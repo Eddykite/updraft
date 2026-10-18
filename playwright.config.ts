@@ -11,7 +11,11 @@ import { defineConfig, devices } from '@playwright/test'
  * PLAYWRIGHT_BASE_URL instead of the local preview server.
  */
 const port = 4173
-const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${port}`
+// Bind the preview server to 127.0.0.1 explicitly. `vite preview` otherwise listens on
+// `localhost`, which on the CI runner resolves to ::1 only — the IPv4 probe below then
+// never connects and Playwright times out waiting for a server that is in fact running.
+const host = '127.0.0.1'
+const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://${host}:${port}`
 const usePreviewServer = !process.env.PLAYWRIGHT_BASE_URL
 
 export default defineConfig({
@@ -38,8 +42,8 @@ export default defineConfig({
   ...(usePreviewServer
     ? {
         webServer: {
-          command: `pnpm preview --port ${port} --strictPort`,
-          url: `http://127.0.0.1:${port}`,
+          command: `pnpm preview --host ${host} --port ${port} --strictPort`,
+          url: baseURL,
           reuseExistingServer: !process.env.CI,
           timeout: 60_000,
         },

@@ -31,7 +31,7 @@ jobs:
     steps:
       # All third-party actions are pinned to commit SHAs, never floating tags (spec §7).
       - name: Checkout
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Set up pnpm
         # Version comes from the `packageManager` field in package.json.
