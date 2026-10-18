@@ -65,6 +65,26 @@ test('holding keeps the kite alive past 3 s', async ({ page }) => {
   await page.keyboard.up('Space')
 })
 
+test('Esc pauses, and the press that resumes does not also climb', async ({ page }, testInfo) => {
+  await openGame(page)
+  await requireSimulation(page)
+
+  await page.keyboard.press('Space')
+  await expect(page.locator('html')).toHaveAttribute('data-updraft-phase', 'playing')
+
+  await page.keyboard.press('Escape')
+  await expect(page.locator('html')).toHaveAttribute('data-updraft-phase', 'paused')
+  await captureScene(page, testInfo, 'paused')
+
+  // No time passes while paused: the simulation is simply not stepped.
+  const frozen = await score(page)
+  await page.waitForTimeout(500)
+  expect(await score(page)).toBe(frozen)
+
+  await page.keyboard.press('Space')
+  await expect(page.locator('html')).toHaveAttribute('data-updraft-phase', 'playing')
+})
+
 test('a deliberate crash reaches game over with the score shown', async ({ page }, testInfo) => {
   const errors = watchConsole(page)
   await openGame(page)

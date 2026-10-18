@@ -18,6 +18,18 @@ pnpm exec playwright install chromium webkit && pnpm e2e
 Node 22 (see `.nvmrc`), pnpm 12. `pnpm verify` = typecheck → lint → format check → tests with
 coverage → build → bundle budget.
 
+## Controls
+
+| | |
+| --- | --- |
+| Climb | hold Space / ↑ / W / left mouse button, or hold anywhere on the canvas |
+| Start, restart | press any of the above |
+| Pause | Esc, losing focus, or hiding the tab — the press that resumes does not also climb |
+| Mute | M, or the speaker (a 44 × 44 target, top right); persists across reloads |
+
+`?seed=12345` replays an identical course — the game-over screen prints the seed a run was
+flown with, so a bug report can carry one.
+
 ## Layout
 
 ```
@@ -36,8 +48,13 @@ src/
     scoring.ts           score, streak, multiplier
     difficulty.ts        speed / gap / interval as pure functions of elapsed time
   io/                    input.ts · storage.ts · audio.ts
-  render/                viewport.ts · renderer.ts · hud.ts
+  render/                viewport.ts · renderer.ts · hud.ts · palette.ts
 ```
+
+The shell publishes what it is doing as `data-updraft-*` attributes on `<html>` (phase, score,
+best, muted). That is the seam the Playwright suite asserts against — reading pixels off a
+canvas proves nothing and breaks on every tuning change. The pixels are evidence for a human
+instead: `test-results/screens/`, uploaded by CI.
 
 ## The one architectural rule
 
