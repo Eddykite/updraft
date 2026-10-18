@@ -43,7 +43,18 @@ export function flyTape(
   const edges = tape.map((duration) => (edge += duration + delayPerPhaseMs * rand()))
   const total = edges[edges.length - 1] ?? 0
 
+  // Bounded by frame count as well as by the clock, for the same reason as
+  // playRun: a loop whose only bound is the simulation's own `elapsed` is one
+  // edit away from being unable to terminate, and a synchronous hang is the one
+  // failure vitest cannot report (GOK-18).
+  const frameBudget = Math.ceil(total / 1000 / FIXED_DT) + 120
+  let frames = 0
+
   while (state.phase === 'playing' && state.elapsed * 1000 < total) {
+    frames += 1
+    if (frames > frameBudget) {
+      throw new Error(`flyTape exceeded its frame budget (${frameBudget} frames for ${total}ms)`)
+    }
     const ms = state.elapsed * 1000
     let i = 0
     while (i < edges.length && ms >= (edges[i] as number)) i += 1

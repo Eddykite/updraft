@@ -67,6 +67,9 @@
  * S is the distance scrolled in one spawn interval, `speed(p)·interval(p)` =
  * 288 + 258p - 168p², minimised at p = 0, less at most one frame of spawn jitter:
  * 288 - 420/60 = 281 px. So L < 157, and L = 110 leaves 47 px of headroom there.
+ * Both inequalities are asserted from these constants in tests/spawner.test.ts,
+ * so a retune that walks L through a bound fails there rather than silently
+ * eating the margin.
  *
  * That headroom is spent by anything that tightens gate spacing, and the ramp is
  * the thing that would: S is *not* monotonic in p. It peaks at p = 0.77 (387 px)

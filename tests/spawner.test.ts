@@ -1,22 +1,27 @@
 import { describe, expect, it } from 'vitest'
 import {
   CEILING_Y,
+  DIFFICULTY_RAMP_SECONDS,
   FIELD_WIDTH,
   FIRST_GATE_DELAY,
+  FIXED_DT,
   GATE_SPAWN_X,
+  GATE_WIDTH,
   GROUND_Y,
   GAP_Y_MAX_EDGE,
   GAP_Y_MIN,
+  KITE_RADIUS,
   KITE_START_Y,
   MAX_CENTRE_DELTA_MAX,
   MAX_CENTRE_DELTA_MIN,
   NET_LIFT_ACCEL,
   REACH_HEADROOM,
+  THERMAL_LEAD_X,
   THERMAL_OUTSIDE_OFFSET,
   THERMAL_RADIUS,
   VY_CLAMP,
 } from '../src/game/constants.js'
-import { gapHeight, spawnInterval } from '../src/game/difficulty.js'
+import { gapHeight, scrollSpeed, spawnInterval } from '../src/game/difficulty.js'
 import { createRng } from '../src/game/rng.js'
 import {
   gapCentre,
@@ -69,6 +74,56 @@ function course(seed: number, count: number): Array<{ gate: Gate; elapsed: numbe
   }
   return gates
 }
+
+/**
+ * The two bounds on THERMAL_LEAD_X, as literal assertions.
+ *
+ * Added on the GOK-18 review: constants.ts and spawner.ts both argued L = 110
+ * against the numbers 54 and 157, and until now **nothing in the repo pinned
+ * either one**. The only assertion anywhere was `THERMAL_LEAD_X === 110`, which
+ * pins the answer without pinning the reason — a future retune could walk L
+ * straight through a bound and only the open-air test in playable.test.ts, which
+ * watches a run rather than the arithmetic, would notice.
+ *
+ * So the bounds are derived here from the constants they actually depend on,
+ * not quoted. If a change to THERMAL_RADIUS, KITE_RADIUS, GATE_WIDTH or the
+ * difficulty ramp moves a bound onto L, this is what goes red first.
+ *
+ * Note the scope, because it is load-bearing and about to be tested: the upper
+ * bound minimises gate spacing over the ramp **as clamped today**. S is not
+ * monotonic in p — it peaks at p = 0.77 and falls after — so unfreezing the ramp
+ * moves the binding minimum to the far end. See spawner.ts; the constraint for
+ * whoever writes that curve is to keep S above 234 px, or bring L down with it.
+ */
+describe('THERMAL_LEAD_X sits inside both of its bounds', () => {
+  /** Tightest spacing between consecutive gates' leading edges, over the ramp. */
+  const tightestSpacing = (): number => {
+    let tightest = Infinity
+    for (let elapsed = 0; elapsed <= 2 * DIFFICULTY_RAMP_SECONDS; elapsed += 0.05) {
+      tightest = Math.min(tightest, scrollSpeed(elapsed) * spawnInterval(elapsed))
+    }
+    // A gate spawns on a frame boundary, not on the instant the timer expires,
+    // so up to one frame of scroll can be lost. Charged at the ramp's top speed,
+    // which is the conservative direction.
+    return tightest - scrollSpeed(2 * DIFFICULTY_RAMP_SECONDS) * FIXED_DT
+  }
+
+  it('is clear of its own gate: the kite cannot touch the ring from inside a column', () => {
+    // The ring enters reach at (Rt + Rk) from KITE_X; the column has to clear the
+    // near side of the kite, a further Rk. One Rk each, not two.
+    const lower = THERMAL_RADIUS + KITE_RADIUS + KITE_RADIUS
+    expect(lower).toBe(54)
+    expect(THERMAL_LEAD_X).toBeGreaterThan(lower)
+  })
+
+  it('is clear of the previous gate at the tightest spacing the ramp produces', () => {
+    const spacing = tightestSpacing()
+    expect(spacing).toBeCloseTo(281, 6)
+    const upper = spacing - GATE_WIDTH - (THERMAL_RADIUS + KITE_RADIUS) - KITE_RADIUS
+    expect(upper).toBeCloseTo(157, 6)
+    expect(THERMAL_LEAD_X).toBeLessThan(upper)
+  })
+})
 
 describe('reach', () => {
   it('is zero for no time at all', () => {

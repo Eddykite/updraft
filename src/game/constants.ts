@@ -85,13 +85,19 @@ export const THERMAL_OUTSIDE_OFFSET = 40
  *
  * The ring is in the open air *before* the columns, so the player meets it first,
  * dives or climbs for it, and then has this much distance to get back on line.
- * Bounded on both sides, and both bounds are pinned in tests/playable.test.ts
- * ('never puts a ring where reaching for it means being inside a column', which
- * watches a real run rather than re-deriving the arithmetic): above 54 px so the
- * kite is clear of its own gate's columns before it can touch the ring, and below
- * 157 px so it is clear of the *previous* gate's columns too at the tightest
- * spacing the ramp produces. See spawner.ts for the derivation — including why
- * extending the difficulty ramp past its current clamp eats the headroom.
+ * Bounded on both sides: above 54 px so the kite is clear of its own gate's
+ * columns before it can touch the ring, and below 157 px so it is clear of the
+ * *previous* gate's columns too at the tightest spacing the ramp produces. See
+ * spawner.ts for the derivation — including why extending the difficulty ramp
+ * past its current clamp eats the headroom.
+ *
+ * Both bounds are pinned twice, deliberately. tests/spawner.test.ts
+ * ('THERMAL_LEAD_X sits inside both of its bounds') re-derives each one from the
+ * constants it depends on and asserts 110 is inside it, so a retune that walks
+ * through a bound fails on the arithmetic; tests/playable.test.ts ('never puts a
+ * ring where reaching for it means being inside a column') watches a real run
+ * and asserts no column is ever on the kite while a ring is in reach, so a
+ * bound that is right on paper and wrong in the simulation fails too.
  *
  * Within that window it splits a fixed budget — the open air between two gates —
  * between reaching the ring and getting back to the gap. 110 favours the way back,

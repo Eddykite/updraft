@@ -102,7 +102,7 @@ export async function logicalPoint(
  * Re-derived on 2026-10-18 when the thermals moved outside the gaps (GOK-5): the
  * old schedule flew into the first column of the revised course and scored zero
  * on every machine, quiet or not. The search that produced this one is
- * `tools/feel/scoring-tape.ts`; it keeps the best *worst case* rather than the
+ * `tools/feel/tape-search.ts`; it keeps the best *worst case* rather than the
  * best run, which is why the number it scores is small.
  */
 export const SCORING_TAPE = [739, 649, 865, 520, 249, 360, 621, 713, 300] as const

@@ -187,21 +187,42 @@ describe('the risk/reward layer', () => {
    * THERMAL_LEAD_X on both sides, and the bound depends on the gate spacing the
    * difficulty ramp produces, so it is checked against the real simulation rather
    * than against the arithmetic in spawner.ts's header.
+   *
+   * Two things about *how* it is flown, both found by the GOK-18 review and both
+   * the difference between this test meaning something and reading as though it
+   * does.
+   *
+   * **The player must survive, so fly the safe line.** The quantity being checked
+   * is a property of the gate schedule, not of the kite — the kite's altitude
+   * never enters the clearance below. So the profile's only job is to keep the
+   * run alive long enough to see the course, and the collector profile cannot:
+   * it dies at 7.0, 4.0, 7.1, 23.0 and 68.7 s on these five seeds, so a test
+   * asking for 150 s got a median of seven, and the anti-vacuity guard was
+   * carried by seed 42 alone. COMPETENT survives the full 150 s on all five.
+   *
+   * **The seeds do not buy five schedules.** A gate's x comes from `elapsed`
+   * through `scrollSpeed` and `spawnInterval` only; the rng places gaps
+   * vertically and picks the ring's side. So all five seeds walk the *same*
+   * horizontal schedule and this assertion's strength is its 150 s of duration,
+   * not its seed count. The seeds still earn their place — they vary the course
+   * the player has to survive to get there — but nobody should read five seeds
+   * here as five independent samples of the thing being asserted.
    */
   it('never puts a ring where reaching for it means being inside a column', () => {
     const reach = THERMAL_RADIUS + KITE_RADIUS
     let tightest = Infinity
-    let framesWithARingInReach = 0
+    const framesPerSeed: number[] = []
     for (const seed of SEEDS) {
       // Watched from inside a real run rather than flown by a throwaway input
       // pattern: the gate schedule is what is being checked, and a pattern crude
       // enough to write inline here dies in the first few seconds and never sees
       // the course the player actually meets.
-      playRun(seed, COMPETENT_COLLECTOR, 150, (state) => {
+      let frames = 0
+      const result = playRun(seed, COMPETENT, 150, (state) => {
         if (state.phase !== 'playing') return
         // Horizontal distance from the kite at which a ring is reachable at all.
         if (!state.gates.some((gate) => Math.abs(thermalX(gate) - KITE_X) <= reach)) return
-        framesWithARingInReach += 1
+        frames += 1
         for (const gate of state.gates) {
           const clearance = Math.max(
             gate.x - (KITE_X + KITE_RADIUS),
@@ -210,9 +231,14 @@ describe('the risk/reward layer', () => {
           tightest = Math.min(tightest, clearance)
         }
       })
+      // The run reached the end of the window rather than dying into it: the
+      // 150 above is the test's reach, and this is what stops it being decoration.
+      expect(result.crashCause).toBeNull()
+      framesPerSeed.push(frames)
     }
-    // Not vacuous: rings really do come within reach, on hundreds of frames.
-    expect(framesWithARingInReach).toBeGreaterThan(500)
+    // Not vacuous, and not carried by one outlier: every seed on its own sees
+    // rings in reach on over a thousand frames.
+    for (const frames of framesPerSeed) expect(frames).toBeGreaterThan(1_000)
     // Positive: whenever a ring is in reach, every column is clear of the kite.
     expect(tightest).toBeGreaterThan(0)
     // And not vacuous — the margin is real but not enormous.
@@ -394,13 +420,20 @@ describe("the browser suite's input tape", () => {
 
   /**
    * And under delay, one-sided: a CDP round trip only ever makes a phase longer,
-   * never shorter. 200 delay patterns rather than the search's 120, so passing
-   * here is slightly harder than the thing the search optimised.
+   * never shorter.
+   *
+   * The patterns are drawn from a *different* generator than the search's. They
+   * used to come from `mulberry(i * 7919 + 1)` — the search's own formula over
+   * the same `i` — so of the 200 patterns, 120 were literally the ones the
+   * hill-climb had maximised the minimum over and only 80 were new. "200 rather
+   * than the search's 120" was true about the count and misleading about the
+   * evidence, which is the GOK-18 finding shape. Reseeded so all 200 are unseen,
+   * and it still passes.
    */
   it('still scores when every phase overruns by up to 50 ms', () => {
     const worst = Math.min(
       ...Array.from({ length: 200 }, (_, i) =>
-        flyTape(SCORING_TAPE, E2E_SEED, 50, mulberry(i * 7919 + 1)),
+        flyTape(SCORING_TAPE, E2E_SEED, 50, mulberry(i * 104_729 + 7)),
       ),
     )
     expect(worst).toBeGreaterThan(0)

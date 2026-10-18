@@ -90,11 +90,21 @@ test('a deliberate crash reaches game over with the score shown', async ({ page 
   // screen. Taken on the transition instead it is a picture of empty sky, which
   // is what it was until the thermals moved and the screenshot had to show
   // where they moved to.
+  //
+  // `flyAndCrash` only calls back while the phase is still `playing`, so a run
+  // that dies before phase 2 would take no `playing` shot at all and nothing
+  // would fail — the deploy evidence would just quietly go missing. That is the
+  // self-skipping shape PR #3 deleted, so the capture is asserted rather than
+  // hoped for (GOK-18).
+  let capturedPlaying = false
   const finalScore = await flyAndCrash(page, async (index) => {
-    if (index === 2) await captureScene(page, testInfo, 'playing')
+    if (index !== 2) return
+    await captureScene(page, testInfo, 'playing')
+    capturedPlaying = true
   })
   await captureScene(page, testInfo, 'gameover')
 
+  expect(capturedPlaying, 'the playing screenshot was never taken').toBe(true)
   expect(finalScore).toBeGreaterThanOrEqual(0)
   expect(errors).toEqual([])
 })

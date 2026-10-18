@@ -475,7 +475,26 @@ export function playRun(
   const collectedGates = new Set<number>()
   let peakMultiplier = 1
 
+  // A structural frame budget, not just the two conditions below.
+  //
+  // The hang this replaced looped on `elapsed` while allowing restarts, and a
+  // restart resets `elapsed` — so the loop could run forever and vitest, which
+  // cannot interrupt synchronous code, reported nothing at all for 25 minutes
+  // rather than going red. `playRun` passes `confirmPressed: false` so no
+  // restart can happen under it, which makes that safe *by input pattern*. This
+  // makes it safe by construction instead: whatever a future edit does to the
+  // conditions, the loop cannot outrun the wall clock it was given (GOK-18).
+  const frameBudget = Math.ceil(maxSeconds / FIXED_DT) + 120
+  let frames = 0
+
   while (state.phase === 'playing' && state.elapsed < maxSeconds) {
+    frames += 1
+    if (frames > frameBudget) {
+      throw new Error(
+        `playRun exceeded its frame budget (${frameBudget} frames for ${maxSeconds}s) — ` +
+          'the run is not advancing its own clock',
+      )
+    }
     const gate = targetGate(state)
     if (gate !== undefined && gate.id !== jitterGateId) {
       jitterGateId = gate.id
