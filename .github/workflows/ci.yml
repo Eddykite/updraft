@@ -9,8 +9,11 @@ name: CI
 on:
   push:
     branches: [main]
+  # Every pull request, not only the ones aimed at main. A stacked PR — one that
+  # targets a branch still in review rather than main — got no CI at all under
+  # `branches: [main]`, which is the opposite of what the line above promises
+  # and exactly when a green tick is worth something.
   pull_request:
-    branches: [main]
 
 # Least privilege. The deploy task adds the permissions its chosen host needs,
 # on its own job, not here.
