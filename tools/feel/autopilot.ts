@@ -60,37 +60,66 @@ export interface PlayerProfile {
   /** Altitude error (px) the player does not bother correcting. */
   readonly deadZone: number
   /**
-   * How much of their own lag the player compensates for, in [0, 1].
+   * How many of the frames already in flight the player FAILS to predict.
+   *
+   * An integer, because the controller can only ever respond to an integer: it
+   * replays `pending.length - unanticipatedFrames` committed inputs and steers on
+   * the altitude that produces. This used to be a fraction in [0, 1] of the
+   * pending queue, which was a mistake the GOK-14 review caught — `round(frac *
+   * pending.length)` meant a 5-frame queue had exactly six reachable controllers,
+   * `0.7` and `0.8` were byte-identical, and "lead 0.7" denoted a *different*
+   * controller at every latency. A sweep along that axis could not distinguish a
+   * cliff in the game from the axis's own resolution. This is the quantity the
+   * controller actually responds to, so it is the quantity that gets swept.
    *
    * This knob matters more than any game constant, and getting it wrong is the
    * easiest way to measure the controller instead of the game.
    *
-   * At 0 the player steers on what they saw `latency` ago. That is a closed loop
-   * with pure delay, and bang-bang control plus pure delay oscillates — it dies
-   * in seconds no matter how UPDRAFT is tuned. At 1 they replay every input
-   * already in flight and decide on the resulting altitude, which makes latency
+   * At `latency / FIXED_DT` (nothing predicted) the player steers on what they
+   * saw `latency` ago. That is a closed loop with pure delay, and bang-bang
+   * control plus pure delay oscillates — it dies in seconds no matter how UPDRAFT
+   * is tuned. At 0 they replay every input already in flight, which makes latency
    * cost them *nothing*: in a deterministic world, perfectly predicted delay is
-   * not delay. Both ends are fictions. A human is somewhere in between — they
-   * lead the kite, but their internal model of it is rough — so the interesting
-   * profiles sit around 0.6-0.8 and the extremes are kept only as bounds.
+   * not delay. Both ends are fictions; a human is somewhere in between, leading
+   * the kite with a rough internal model of it. Values above the queue length are
+   * clamped, so a profile can be reused across latencies.
    */
-  readonly anticipation: number
-  /** Std-dev (px) of random aim error, resampled per gate. Models imprecision. */
+  readonly unanticipatedFrames: number
+  /**
+   * Half-width (px) of random aim error, resampled per gate. Models imprecision.
+   *
+   * Half-width, not std-dev: `draw` samples uniformly on [-s, s], so sigma is
+   * s/sqrt(3) ~ 0.58s. The docs here used to say std-dev, which overstated every
+   * number on this axis by about 1.7x.
+   */
   readonly aimJitter: number
   /**
-   * Std-dev (px) of error in the player's read of their *own* altitude,
-   * resampled every frame.
+   * Half-width (px) — same uniform distribution as `aimJitter` — of error in the
+   * player's read of their *own* altitude, resampled every frame.
    *
-   * This is the knob that produces a graded difficulty response, because unlike
-   * aim jitter it perturbs the control loop continuously rather than once per
-   * gate. It stands in for everything a model player otherwise gets for free:
-   * reading a moving kite against a parallax background, estimating vertical
-   * speed by eye, and the fact that attention is not a constant.
+   * It perturbs the control loop continuously rather than once per gate. It
+   * stands in for everything a model player otherwise gets for free: reading a
+   * moving kite against a parallax background, estimating vertical speed by eye,
+   * and the fact that attention is not a constant.
+   *
+   * It is *not* the dominant difficulty axis, despite what sensitivity.ts used to
+   * claim: white noise fed into a bang-bang controller is largely filtered by the
+   * kite's own inertia, and at full prediction even +-32px leaves survival
+   * untouched. `unanticipatedFrames` is the axis that bites.
    */
   readonly perception: number
   /**
    * Clearance (px) to the nearer column that an `opportunist` insists on before
    * going for a ring. Ignored by the other strategies.
+   *
+   * This is a step function, not a dial, and the step is the finding rather than
+   * a defect: see `opportunistKnee` in geometry.ts. The clearance of the cheapest
+   * collecting line is `min(h/2, THERMAL_EDGE_INSET + THERMAL_RADIUS) -
+   * KITE_RADIUS`, which is 67px for most of the ramp and 59px at its hardest, so
+   * every tolerance below 59 takes every ring and every tolerance above 67
+   * declines every ring. Reporting a tolerance from the first band as if it
+   * measured caution is reporting an identity — the GOK-14 review was right about
+   * that, and report.ts now prints the knee instead.
    */
   readonly riskTolerance: number
 }
@@ -102,10 +131,29 @@ export interface RunResult {
   readonly score: number
   readonly gatesPassed: number
   readonly thermalsCollected: number
-  /** Thermals that passed by uncollected. */
+  /**
+   * Gates that went by with their ring untaken.
+   *
+   * Counted per gate id, not as `gatesPassed - thermalsCollected`: a ring is
+   * collected on contact but its gate only counts as passed when its trailing
+   * edge clears the kite, so the subtraction went negative whenever a run ended
+   * between those two moments — and printed `rings 101% of gates`.
+   */
   readonly thermalsMissed: number
+  /** Rings taken on gates that are fully behind the kite. The honest denominator pair. */
+  readonly thermalsTakenOnPassedGates: number
   readonly peakMultiplier: number
   readonly crashCause: 'ground' | 'column' | null
+  /**
+   * True if the run hit `maxSeconds` instead of ending.
+   *
+   * Every duration-based statistic is censored by this, and at the competent
+   * operating point *every* run is — the ramp freezes at DIFFICULTY_RAMP_SECONDS,
+   * so a player still alive then is alive forever and the cutoff is the only
+   * thing making their duration finite. Report exposure-based rates (deaths per
+   * gate) rather than mean durations whenever this is true.
+   */
+  readonly censored: boolean
 }
 
 /** The gate the player is currently flying at: the first one not yet behind the kite. */
@@ -182,26 +230,32 @@ function wantsToClimb(y: number, vy: number, target: number, deadZone: number): 
  * Integrate the kite forward through the inputs already committed, to steer on
  * where it is going rather than where it was.
  *
- * It replays the first `anticipation` of `pending` — the decisions already in
- * flight — rather than assuming the current input is held throughout. Those are
- * the inputs that *will* land before this decision does, so they are exactly
- * what the kite is about to do. Replaying only a fraction of them is how an
+ * It replays all but `unanticipatedFrames` of `pending` — the decisions already
+ * in flight — rather than assuming the current input is held throughout. Those
+ * are the inputs that *will* land before this decision does, so they are exactly
+ * what the kite is about to do. Leaving the last few unreplayed is how an
  * imperfect lead is modelled: the player sees part of the way to where the kite
  * is going, and the remainder is prediction error they have to correct for
  * later.
  */
-function lookAhead(kite: Kite, pending: readonly boolean[], anticipation: number): Kite {
-  const steps = Math.round(Math.min(Math.max(anticipation, 0), 1) * pending.length)
+function lookAhead(kite: Kite, pending: readonly boolean[], unanticipatedFrames: number): Kite {
+  const blind = Math.min(Math.max(Math.round(unanticipatedFrames), 0), pending.length)
+  const steps = pending.length - blind
   let ahead = kite
   for (let i = 0; i < steps; i += 1) ahead = integrate(ahead, pending[i] as boolean, FIXED_DT)
   return ahead
+}
+
+/** Frames of input queue a given latency produces. The resolution of the lead axis. */
+export function latencyFrames(latency: number): number {
+  return Math.max(0, Math.round(latency / FIXED_DT))
 }
 
 /** Play one run to its crash (or to `maxSeconds`) and report what happened. */
 export function playRun(seed: number, profile: PlayerProfile, maxSeconds = 300): RunResult {
   let state = step(createInitialState(seed), { holding: false, confirmPressed: true }, FIXED_DT)
 
-  const latencySteps = Math.max(0, Math.round(profile.latency / FIXED_DT))
+  const latencySteps = latencyFrames(profile.latency)
   const pending: boolean[] = Array.from({ length: latencySteps }, () => false)
 
   // Both noise sources come from one generator seeded off the run, so the whole
@@ -219,6 +273,9 @@ export function playRun(seed: number, profile: PlayerProfile, maxSeconds = 300):
 
   let gatesPassed = 0
   let thermalsCollected = 0
+  let thermalsMissed = 0
+  let thermalsTakenOnPassedGates = 0
+  const collectedGates = new Set<number>()
   let peakMultiplier = 1
 
   while (state.phase === 'playing' && state.elapsed < maxSeconds) {
@@ -229,7 +286,7 @@ export function playRun(seed: number, profile: PlayerProfile, maxSeconds = 300):
     }
 
     const target = aimFor(state, profile) + jitter
-    const led = lookAhead(state.kite, pending, profile.anticipation)
+    const led = lookAhead(state.kite, pending, profile.unanticipatedFrames)
     // The player reads their own altitude imperfectly; velocity is left clean,
     // since differentiating noise would model a sensor rather than a person.
     const decision = wantsToClimb(
@@ -248,8 +305,18 @@ export function playRun(seed: number, profile: PlayerProfile, maxSeconds = 300):
     state = step(state, { holding, confirmPressed: false }, FIXED_DT)
 
     for (const event of state.events) {
-      if (event.type === 'gate_passed') gatesPassed += 1
-      if (event.type === 'thermal_collected') thermalsCollected += 1
+      // thermal_collected always precedes its gate_passed — contact happens
+      // inside the gate, the pass is scored on its trailing edge — so the set is
+      // always populated by the time the gate is counted.
+      if (event.type === 'thermal_collected') {
+        thermalsCollected += 1
+        collectedGates.add(event.gateId)
+      }
+      if (event.type === 'gate_passed') {
+        gatesPassed += 1
+        if (collectedGates.has(event.gateId)) thermalsTakenOnPassedGates += 1
+        else thermalsMissed += 1
+      }
       if (event.type === 'multiplier_up')
         peakMultiplier = Math.max(peakMultiplier, event.multiplier)
     }
@@ -262,8 +329,10 @@ export function playRun(seed: number, profile: PlayerProfile, maxSeconds = 300):
     score: state.score,
     gatesPassed,
     thermalsCollected,
-    thermalsMissed: gatesPassed - thermalsCollected,
+    thermalsMissed,
+    thermalsTakenOnPassedGates,
     peakMultiplier,
     crashCause: state.crashCause,
+    censored: state.crashCause === null,
   }
 }

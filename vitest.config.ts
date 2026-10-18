@@ -31,9 +31,15 @@ export default defineConfig({
       // state is what the player set and that nothing throws.
       include: ['src/game/**/*.ts', 'src/app/**/*.ts', 'src/io/**/*.ts'],
       exclude: ['src/io/audio.ts'],
+      // One threshold group per directory, deliberately. A single
+      // `src/{app,io}/**` group aggregated the two — and io's 98% branch
+      // coverage carried app's 78%, so the gate passed while app was ten points
+      // under the number its own comment claimed to enforce. A gate that can be
+      // satisfied by a sibling directory is not a gate. (GOK-14 review.)
       thresholds: {
         'src/game/**/*.ts': { lines: 85, functions: 85, branches: 85, statements: 85 },
-        'src/{app,io}/**/*.ts': { lines: 85, functions: 85, branches: 85, statements: 85 },
+        'src/app/**/*.ts': { lines: 85, functions: 85, branches: 85, statements: 85 },
+        'src/io/**/*.ts': { lines: 85, functions: 85, branches: 85, statements: 85 },
       },
     },
   },

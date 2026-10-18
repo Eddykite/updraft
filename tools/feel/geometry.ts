@@ -141,6 +141,12 @@ export function sampleCourse(seed: number, seconds: number): GateGeometry[] {
  * always exists, for every h, Rt, Rk and every placement rule. The inset does
  * not appear in the argument, which is exactly why retuning it cannot help.
  *
+ * One precondition, stated because this proof is load-bearing for the whole
+ * recommendation: it needs h >= 2*Rk, or the safe band is empty and clamping has
+ * nothing to clamp into. UPDRAFT never gets near that — the ramp bottoms out at a
+ * 150px gap against 2*Rk = 32px — and the sweep below skips those combinations
+ * explicitly rather than counting them as safe.
+ *
  * Returns the number of (h, Rt, ty) combinations that admit a risky thermal.
  * It should be 0.
  */
@@ -149,13 +155,16 @@ export function searchForRiskyPlacement(): { tested: number; risky: number } {
   let risky = 0
   const Rk = KITE_RADIUS
   for (let h = 100; h <= 300; h += 5) {
+    // The proof's one precondition: below this the safe band is empty and the
+    // gate is unflyable with or without a ring. Skipped rather than counted, so
+    // `tested` is exactly the set the claim is made about.
+    if (h < 2 * Rk) continue
     for (let Rt = 4; Rt <= 60; Rt += 2) {
       if (2 * Rt > h) continue
       for (let ty = Rt; ty <= h - Rt; ty += 1) {
         tested += 1
         const safeLow = Rk
         const safeHigh = h - Rk
-        if (safeLow > safeHigh) continue
         const nearest = Math.min(Math.max(ty, safeLow), safeHigh)
         // "Risky" would mean: no surviving altitude is close enough to collect.
         if (Math.abs(nearest - ty) > Rt + Rk) risky += 1
@@ -206,6 +215,44 @@ export function costAcrossTheRamp(): string {
       : `  outright once the gap is under ${freeAt.toFixed(0)}px, i.e. from t=${when.toFixed(0)}s onward.`,
     `  (GAP_Y_MIN ${GAP_Y_MIN} is irrelevant here — this is all gap-relative.)`,
   ].join('\n')
+}
+
+/**
+ * At what nerve does a player start declining rings at all?
+ *
+ * The `opportunist` profile takes a ring only when the cheapest collecting line
+ * still leaves it `riskTolerance` px of clearance to the nearer column. That
+ * clearance is not a distribution — it is a closed form:
+ *
+ *   cheapest line = centre + sign * max(0, h/2 - INSET - reach)
+ *   clearance     = min(h/2 - KITE_RADIUS, INSET + THERMAL_RADIUS)
+ *
+ * The gap height cancels out entirely in the second branch, so the clearance is a
+ * flat INSET + THERMAL_RADIUS = 67px for most of the ramp and `h/2 -
+ * KITE_RADIUS` (59px) once the gap is tight. So the "opportunist" is a step
+ * function of its own tolerance: at or below the floor it is the collector, above
+ * the ceiling it is the safe line, and only the sliver between them declines
+ * selectively — and then only on the hardest gates.
+ *
+ * This is why quoting "a cautious player still takes 70% of rings" was an
+ * identity rather than a measurement (GOK-14). The knee is the real statement.
+ */
+export function opportunistKnee(): {
+  /** At or below this tolerance the opportunist declines nothing, at any difficulty. */
+  readonly floor: number
+  /** Above this tolerance it declines everything, at any difficulty. */
+  readonly ceiling: number
+  /** Gap height at which the clearance stops being flat and starts tracking h. */
+  readonly tightensBelowGap: number
+} {
+  const clearanceOnCheapestLine = (h: number): number =>
+    Math.min(h / 2 - KITE_RADIUS, THERMAL_EDGE_INSET + THERMAL_RADIUS)
+  const over = [gapHeight(0), gapHeight(DIFFICULTY_RAMP_SECONDS)].map(clearanceOnCheapestLine)
+  return {
+    floor: Math.min(...over),
+    ceiling: Math.max(...over),
+    tightensBelowGap: 2 * (THERMAL_EDGE_INSET + THERMAL_RADIUS + KITE_RADIUS),
+  }
 }
 
 /**

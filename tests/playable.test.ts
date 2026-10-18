@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { playRun, type PlayerProfile } from '../tools/feel/autopilot.js'
-import { sampleCourse, searchForRiskyPlacement } from '../tools/feel/geometry.js'
+import { latencyFrames, playRun, type PlayerProfile } from '../tools/feel/autopilot.js'
+import { opportunistKnee, sampleCourse, searchForRiskyPlacement } from '../tools/feel/geometry.js'
 import {
   CEILING_Y,
   DIFFICULTY_RAMP_SECONDS,
@@ -33,7 +33,7 @@ const FRAME_PERFECT: PlayerProfile = {
   strategy: 'collector',
   latency: 0,
   deadZone: 0,
-  anticipation: 1,
+  unanticipatedFrames: 0,
   aimJitter: 0,
   perception: 0,
   riskTolerance: 0,
@@ -141,6 +141,110 @@ describe('the risk/reward layer', () => {
     expect(course.length).toBeGreaterThan(100)
     const worst = Math.max(...course.map((g) => g.marginCost / g.clearanceOnCentre))
     expect(worst).toBeLessThan(0.5)
+  })
+})
+
+describe('the instrument is not measuring itself', () => {
+  /**
+   * The GOK-14 review found the model player reporting three of its own
+   * properties as findings about the game. The repairs are pinned here, because
+   * an instrument that quietly goes back to flattering the design is worse than
+   * no instrument: it produces confident wrong answers, which is how the
+   * thermals question nearly got decided on the wrong evidence.
+   */
+
+  /**
+   * `thermalsMissed` used to be `gatesPassed - thermalsCollected`, and a ring is
+   * collected on contact while its gate only counts as passed on its trailing
+   * edge — so a run ending between the two printed a negative miss count and
+   * "rings 101% of gates". Counted per gate id now, so the two halves must
+   * partition the passed gates exactly.
+   */
+  it('counts missed rings per gate, so the tally never exceeds the gates', () => {
+    const sloppy: PlayerProfile = {
+      strategy: 'collector',
+      latency: 0.083,
+      deadZone: 8,
+      unanticipatedFrames: 3,
+      aimJitter: 18,
+      perception: 28,
+      riskTolerance: 0,
+    }
+    const results = [20261018, 1234, 7, 999_983, 42, 55, 101].map((seed) =>
+      playRun(seed, sloppy, 60),
+    )
+    // The point of the profile: these runs end mid-course, which is the case the
+    // old subtraction got wrong.
+    expect(results.some((r) => r.crashCause !== null)).toBe(true)
+    for (const r of results) {
+      expect(r.thermalsMissed).toBeGreaterThanOrEqual(0)
+      expect(r.thermalsTakenOnPassedGates + r.thermalsMissed).toBe(r.gatesPassed)
+      expect(r.thermalsTakenOnPassedGates).toBeLessThanOrEqual(r.thermalsCollected)
+    }
+  })
+
+  /**
+   * The lead axis is quantised to whole frames of the input queue — it always
+   * was, but it used to be expressed as a fraction, which hid the resolution and
+   * made two adjacent rows of the sweep the identical controller. Asking for more
+   * unpredicted frames than exist clamps, so a profile is portable across
+   * latencies and the axis means the same thing at each one.
+   */
+  it('clamps the lead axis to the frames that exist, rather than silently aliasing', () => {
+    const base: PlayerProfile = {
+      strategy: 'collector',
+      latency: 0.083,
+      deadZone: 8,
+      unanticipatedFrames: latencyFrames(0.083),
+      aimJitter: 10,
+      perception: 16,
+      riskTolerance: 0,
+    }
+    const blind = playRun(4242, base, 60)
+    const blinder = playRun(4242, { ...base, unanticipatedFrames: 50 }, 60)
+    expect(blinder).toEqual(blind)
+
+    // And at zero latency there is exactly one controller: nothing is in flight,
+    // so no amount of failing to predict it can change anything.
+    const instant = { ...base, latency: 0, unanticipatedFrames: 0 }
+    expect(playRun(4242, { ...instant, unanticipatedFrames: 4 }, 60)).toEqual(
+      playRun(4242, instant, 60),
+    )
+  })
+
+  /**
+   * The `opportunist` was reported as evidence that a cautious player still takes
+   * most rings. It could not have done otherwise: the clearance left by the
+   * cheapest collecting line is a constant, so the profile is a step function of
+   * its own tolerance. Both sides of the step are pinned — below the knee it is
+   * the collector, above it the safe line — so the day someone quotes an
+   * opportunist number again, this says what it is worth.
+   */
+  it('has no tolerance at which declining a ring is a judgement call', () => {
+    const knee = opportunistKnee()
+    expect(knee.floor).toBeLessThan(knee.ceiling)
+
+    const base: PlayerProfile = {
+      strategy: 'opportunist',
+      latency: 0,
+      deadZone: 0,
+      unanticipatedFrames: 0,
+      aimJitter: 0,
+      perception: 0,
+      riskTolerance: knee.floor,
+    }
+    // At the floor it is not merely similar to the collector, it IS the
+    // collector — same run, gate for gate. Above the ceiling it is the safe line.
+    const atFloor = playRun(20261018, base, 120)
+    expect(atFloor.gatesPassed).toBeGreaterThan(50)
+    expect(atFloor).toEqual(playRun(20261018, { ...base, strategy: 'collector' }, 120))
+
+    const aboveCeiling = playRun(20261018, { ...base, riskTolerance: knee.ceiling + 1 }, 120)
+    expect(aboveCeiling).toEqual(playRun(20261018, { ...base, strategy: 'safe' }, 120))
+
+    // And the safe line is not abstaining — it takes most of the rings anyway,
+    // which is the whole finding.
+    expect(aboveCeiling.thermalsMissed).toBeLessThan(aboveCeiling.gatesPassed)
   })
 })
 
