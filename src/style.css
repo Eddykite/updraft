@@ -1,0 +1,42 @@
+/* System font stack only — no font files (spec §8, decision 2). */
+:root {
+  color-scheme: dark;
+  --backdrop: #07121d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--backdrop);
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    sans-serif;
+  overflow: hidden;
+  /* One control axis, hold to climb: never let the browser steal the gesture. */
+  touch-action: none;
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#app {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+
+/* The field is letterboxed, never stretched — identical layout everywhere. */
+#game {
+  display: block;
+  touch-action: none;
+}

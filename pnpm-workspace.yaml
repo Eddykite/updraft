@@ -1,0 +1,20 @@
+# Not a workspace — this file exists because pnpm 12 reads its supply-chain
+# settings from here. Both settings below are deliberate (spec §7).
+
+# Lifecycle scripts are disabled globally via .npmrc (ignore-scripts=true). pnpm
+# then asks which packages may run build scripts anyway; the answer is none.
+# esbuild (a transitive dev dependency of Vite) ships prebuilt platform binaries
+# as optional dependencies, so it works fine without its postinstall.
+#
+# Playwright's browser download is likewise an explicit CI step, never a postinstall.
+# Flipping any of these to `true` is a dependency-posture change and needs
+# Security Engineer sign-off.
+allowBuilds:
+  esbuild: false
+
+# pnpm 12 quarantines very recently published versions by default, which is a
+# genuinely useful defence against a compromised release. Entries here are
+# versions we have accepted ahead of that window; the committed lockfile plus
+# --frozen-lockfile is what actually fixes resolution in CI.
+minimumReleaseAgeExclude:
+  - eslint@10.13.0

@@ -1,0 +1,118 @@
+name: CI
+
+# Spec §4: one workflow, every push and every PR, fail-fast.
+#
+# CI does NOT deploy. The deploy step is added by the deploy task once a host
+# exists (spec §5, rule 3). Everything up to `vite build` plus artifact upload is
+# host-neutral and can run today.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Least privilege. The deploy task adds the permissions its chosen host needs,
+# on its own job, not here.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Branch protection on main requires this job by name.
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      # All third-party actions are pinned to commit SHAs, never floating tags (spec §7).
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+
+      - name: Set up pnpm
+        # Version comes from the `packageManager` field in package.json.
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+
+      - name: Set up Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      # Lockfile drift fails the build rather than silently resolving.
+      # Lifecycle scripts are disabled via .npmrc (ignore-scripts=true).
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint (includes the src/game/** import boundary)
+        run: pnpm lint
+
+      - name: Format check
+        run: pnpm format:check
+
+      # Test failures are blocking. The >=85% coverage gate on src/game/** is NOT,
+      # until the simulation task lands — spec §3. To make it blocking, change
+      # COVERAGE_ENFORCE to '1'. That is the entire change.
+      - name: Unit tests with coverage
+        env:
+          COVERAGE_ENFORCE: '0'
+        run: pnpm test:coverage
+
+      - name: Build
+        run: pnpm build
+
+      - name: Bundle budget (60 KB gzipped JS)
+        run: pnpm budget
+
+      # Explicit step, never an implicit postinstall (spec §7).
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium webkit
+
+      - name: Playwright smoke against built dist
+        run: pnpm e2e
+
+      # Zero runtime dependencies means this should always be clean, so any hit
+      # is a real signal rather than noise. Blocking.
+      - name: Audit runtime dependencies (blocking)
+        run: pnpm audit --prod --audit-level low
+
+      # Dev advisories are reported and triaged, not auto-blocking.
+      - name: Audit dev dependencies (report only)
+        continue-on-error: true
+        run: pnpm audit --dev --audit-level moderate
+
+      - name: Upload dist (includes source maps — artifacts only, never published)
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: dist
+          path: dist
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload Playwright report (screenshots and traces)
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: playwright-report
+          path: |
+            playwright-report
+            test-results
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: coverage
+          path: coverage
+          if-no-files-found: ignore
+          retention-days: 14

@@ -1,0 +1,17 @@
+{
+  // Spec §2, "the one architectural rule": src/game/** is pure.
+  //
+  // This project typechecks the simulation WITHOUT the DOM lib and WITHOUT node types,
+  // so `document`, `window`, `localStorage`, `performance` and friends are not merely
+  // discouraged there — they do not exist. The ESLint boundary (eslint.config.js) catches
+  // cross-layer imports and Date.now/Math.random; this catches ambient browser globals.
+  //
+  // Both run in CI. Neither is style: §3's determinism and property tests are only
+  // possible while this holds.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "types": []
+  },
+  "include": ["src/game"]
+}
