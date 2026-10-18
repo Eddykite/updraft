@@ -57,12 +57,10 @@ jobs:
       - name: Format check
         run: pnpm format:check
 
-      # Test failures are blocking. The >=85% coverage gate on src/game/** is NOT,
-      # until the simulation task lands — spec §3. To make it blocking, change
-      # COVERAGE_ENFORCE to '1'. That is the entire change.
-      - name: Unit tests with coverage
-        env:
-          COVERAGE_ENFORCE: '0'
+      # Test failures and the >=85% coverage gate on src/game/** are both
+      # blocking (spec §3). The threshold lives in vitest.config.ts so that a
+      # local `pnpm test:coverage` fails for exactly the same reason this does.
+      - name: Unit tests with coverage (>=85% on src/game/**, blocking)
         run: pnpm test:coverage
 
       - name: Build

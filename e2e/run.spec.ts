@@ -54,15 +54,23 @@ test('a touch starts a run', async ({ page }) => {
   await expect(page.locator('html')).toHaveAttribute('data-updraft-phase', 'playing')
 })
 
-test('holding keeps the kite alive past 3 s', async ({ page }) => {
+test('holding pins the kite to the ceiling without killing it', async ({ page }) => {
   await openGame(page)
   await requireSimulation(page)
 
   await page.keyboard.down('Space')
-  await page.waitForTimeout(3200)
-  // Still flying: the ceiling is a soft clamp, not a kill (concept doc).
+  // Long enough to be pinned against the ceiling (the kite reaches y = 30 in
+  // about 0.9 s) and short enough that the first gate is still on its way: with
+  // the real simulation the first gate reaches the kite at t = 3.217 s, and the
+  // ceiling sits above every possible gap, so "hold forever" is a death, just
+  // not a death *by ceiling*. That is the distinction this test is making.
+  await page.waitForTimeout(1500)
   expect(await phase(page)).toBe('playing')
+
+  // And it is still flying after letting go again.
   await page.keyboard.up('Space')
+  await page.waitForTimeout(200)
+  expect(await phase(page)).toBe('playing')
 })
 
 test('Esc pauses, and the press that resumes does not also climb', async ({ page }, testInfo) => {
@@ -109,9 +117,14 @@ test('the game-over screen ignores a death-frame press, then restarts', async ({
   await requireSimulation(page)
 
   await page.keyboard.press('Space')
-  await expect(page.locator('html')).toHaveAttribute('data-updraft-phase', 'gameover', {
-    timeout: 15_000,
-  })
+  // Catch the death on the frame it happens. `toHaveAttribute` polls every
+  // 100 ms, which can burn a quarter of the 400 ms lock before the press below
+  // is even sent; waitForFunction polls on rAF instead.
+  await page.waitForFunction(
+    () => document.documentElement.dataset.updraftPhase === 'gameover',
+    undefined,
+    { polling: 'raf', timeout: 15_000 },
+  )
 
   // Inside the 400 ms lock: this press must not burn the restart.
   await page.keyboard.press('Space')
