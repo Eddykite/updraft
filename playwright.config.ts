@@ -36,7 +36,11 @@ export default defineConfig({
     },
     {
       name: 'mobile-webkit',
-      use: { ...devices['iPhone 13'] },
+      // iPhone 13 gives WebKit plus touch, a mobile UA and DPR 3 (which the
+      // viewport's DPR cap of 2 then clamps). Its stock viewport is 390 x 664 —
+      // the browser-chrome-inset height. The screenshots are deploy evidence at
+      // the device height the spec names, so the viewport is set to 390 x 844.
+      use: { ...devices['iPhone 13'], viewport: { width: 390, height: 844 } },
     },
   ],
   ...(usePreviewServer
