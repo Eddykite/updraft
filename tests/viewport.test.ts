@@ -46,10 +46,33 @@ describe('computeViewport', () => {
     expect(computeViewport(390, 844, 1.5).dpr).toBe(1.5)
   })
 
+  it('clamps a sub-native ratio up to 1', () => {
+    // A zoomed-out desktop browser reports DPR < 1. Honouring it would give a
+    // backing store smaller than the CSS box, i.e. a visibly soft canvas.
+    expect(computeViewport(1440, 900, 0.5).dpr).toBe(1)
+    expect(computeViewport(1440, 900, 0.75).dpr).toBe(1)
+  })
+
   it('sizes the backing store to the capped ratio', () => {
     const viewport = computeViewport(1440, 900, 3)
     expect(viewport.pixelWidth).toBe(Math.floor(viewport.cssWidth * DPR_CAP))
-    expect(viewport.pixelHeight).toBe(Math.floor(viewport.cssHeight * DPR_CAP))
+  })
+
+  it('keeps the backing store exactly 9:16, so the uniform transform fills it', () => {
+    // main.ts derives ONE scale factor from pixelWidth and draws 540x960 logical
+    // through it. If pixelHeight were floored independently it could miss that
+    // by a device pixel — a hairline unpainted strip, or a clipped bottom row.
+    for (const [w, h, dpr] of [
+      [1440, 900, 3],
+      [390, 844, 3],
+      [1000, 1000, 1],
+      [333, 777, 1.5],
+    ] as const) {
+      const viewport = computeViewport(w, h, dpr)
+      const unit = viewport.pixelWidth / 540
+      expect(viewport.pixelHeight).toBe(Math.round(unit * 960))
+      expect(viewport.cssHeight).toBe(Math.round((viewport.cssWidth * 960) / 540))
+    }
   })
 
   it('scales down for a window smaller than the field, and up for a larger one', () => {

@@ -60,32 +60,6 @@ export interface SceneStatus {
   readonly score: number
   readonly best: number
   readonly muted: boolean
-  /**
-   * TEMPORARY — delete with `probeSimulation` once GOK-4 lands.
-   *
-   * False while `step` still throws `not implemented`. The Playwright suite
-   * reads it to decide whether the run-level assertions can run yet.
-   */
-  readonly simulationReady: boolean
-}
-
-/**
- * TEMPORARY (remove when the simulation task lands).
- *
- * The shell is built against the frozen contract while `src/game/update.ts` is
- * still a stub that throws. One probe at construction, rather than a try/catch
- * in the frame loop: if the simulation is not there, the shell mounts, renders
- * the title screen, and takes input — it simply never starts a run. That keeps
- * the shell reviewable and CI honest instead of green-by-omission, and the
- * moment `step` is implemented every path below turns on by itself.
- */
-function probeSimulation(step: typeof realStep): boolean {
-  try {
-    step(createInitialState(0), { holding: false, confirmPressed: false }, 1 / 60)
-    return true
-  } catch {
-    return false
-  }
 }
 
 type Storage = Pick<typeof realStorage, 'readBest' | 'writeBest' | 'readMuted' | 'writeMuted'>
@@ -107,7 +81,6 @@ export interface SceneHostDeps {
 export function createSceneHost(deps: SceneHostDeps): SceneHost {
   const storage: Storage = deps.storage ?? realStorage
   const step = deps.step ?? realStep
-  const simulationReady = probeSimulation(step)
 
   let state = createInitialState(deps.seed)
   let best = storage.readBest()
@@ -130,7 +103,6 @@ export function createSceneHost(deps: SceneHostDeps): SceneHost {
       score: state.score,
       best,
       muted,
-      simulationReady,
     }
     if (
       published &&
@@ -180,13 +152,6 @@ export function createSceneHost(deps: SceneHostDeps): SceneHost {
     if (gameOverLock > 0) gameOverLock = Math.max(0, gameOverLock - dt)
 
     const input = deps.input.sample()
-
-    // TEMPORARY (remove with probeSimulation): no simulation, no run. The title
-    // screen, pause, mute and the HUD are all live; pressing simply does nothing.
-    if (!simulationReady) {
-      publish()
-      return
-    }
 
     if (state.phase === 'paused') {
       // No time passes while paused — the simulation is simply not stepped.
@@ -269,7 +234,7 @@ export function createSceneHost(deps: SceneHostDeps): SceneHost {
     },
 
     status(): SceneStatus {
-      return { phase: state.phase, score: state.score, best, muted, simulationReady }
+      return { phase: state.phase, score: state.score, best, muted }
     },
   }
 }

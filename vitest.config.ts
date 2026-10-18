@@ -20,8 +20,21 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'html', 'lcov'],
       reportsDirectory: 'coverage',
-      include: ['src/game/**/*.ts'],
-      thresholds: { lines: 85, functions: 85, branches: 85, statements: 85 },
+      // src/app/** and src/io/** were outside the gate until GOK-5, which is
+      // where most of the shell's source lives — so the gate was measuring a
+      // third of the codebase. They are in now, under their own threshold so a
+      // shell regression cannot be masked by the simulation's headroom.
+      //
+      // Still deliberately excluded, for the same reason as render/: asserting
+      // that an oscillator was constructed is theatre, not evidence. io/audio.ts
+      // and main.ts are proved by the browser suite, which checks that the mute
+      // state is what the player set and that nothing throws.
+      include: ['src/game/**/*.ts', 'src/app/**/*.ts', 'src/io/**/*.ts'],
+      exclude: ['src/io/audio.ts'],
+      thresholds: {
+        'src/game/**/*.ts': { lines: 85, functions: 85, branches: 85, statements: 85 },
+        'src/{app,io}/**/*.ts': { lines: 85, functions: 85, branches: 85, statements: 85 },
+      },
     },
   },
 })

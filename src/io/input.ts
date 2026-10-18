@@ -80,6 +80,11 @@ export function createInputSource(target: HTMLCanvasElement, events: InputEvents
   /** A press only counts as "start/restart" and "climb" if it is not a UI tap. */
   function press(): void {
     confirmPressed = true
+    // A *fresh* press always ends a swallow, even if the swallowed input is
+    // still down. Without this, adding a second finger after resuming from a
+    // pause would not climb until the first one was also lifted — see the
+    // `swallowHold` contract above, which promises exactly this.
+    swallowed = false
     firstGesture()
   }
 

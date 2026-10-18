@@ -129,7 +129,14 @@ export default tseslint.config(
 
   // Config files, scripts and tests run in Node.
   {
-    files: ['*.config.ts', '*.config.js', 'scripts/**/*.mjs', 'tests/**/*.ts', 'e2e/**/*.ts'],
+    files: [
+      '*.config.ts',
+      '*.config.js',
+      'scripts/**/*.mjs',
+      'tests/**/*.ts',
+      'e2e/**/*.ts',
+      'tools/**/*.ts',
+    ],
     languageOptions: {
       globals: { ...globals.node },
     },

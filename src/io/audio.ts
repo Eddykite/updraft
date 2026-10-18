@@ -16,7 +16,7 @@
  * nagging, and means the multiplier is audible without a fourth sound.
  */
 
-import { MULTIPLIER_CAP } from '../game/constants.js'
+import { MULTIPLIER_CAP, SCORE_PER_GATE, SCORE_PER_THERMAL } from '../game/constants.js'
 import type { GameEvent } from '../game/state.js'
 
 export interface Audio {
@@ -161,10 +161,10 @@ export function createAudio(initialMuted: boolean): Audio {
       for (const event of events) {
         switch (event.type) {
           case 'gate_passed':
-            gatePass(multiplierFromPoints(event.points, 10))
+            gatePass(multiplierFromPoints(event.points, SCORE_PER_GATE))
             break
           case 'thermal_collected':
-            thermalCollect(multiplierFromPoints(event.points, 5))
+            thermalCollect(multiplierFromPoints(event.points, SCORE_PER_THERMAL))
             break
           case 'crashed':
             crash()

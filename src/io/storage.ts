@@ -2,9 +2,12 @@
  * Best score in localStorage: one versioned key, validated and clamped (spec §2, §7).
  *
  * **localStorage is untrusted input** — the user can edit it. Corrupt JSON, a
- * missing key, NaN, negative, absurdly large, wrong-type and old-version values
- * must all fall back to 0 rather than throwing or displaying garbage. That is a
- * tested requirement (spec §3), not a nicety.
+ * missing key, NaN, negative, wrong-type and old-version values all fall back to
+ * 0 rather than throwing or displaying garbage. An absurdly large value is
+ * *clamped* to MAX_BEST rather than zeroed: a number too big to be real is far
+ * more likely to be a storage edit than a reason to destroy a genuine score, and
+ * clamping renders safely either way. That is a tested requirement (spec §3),
+ * not a nicety.
  *
  * The key is STORAGE_KEY in game/constants.ts. One key holds the whole record:
  * `{"v":1,"best":1234,"muted":false}`. Mute lives here too so there is exactly

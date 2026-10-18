@@ -29,13 +29,22 @@ export function computeViewport(
 ): Viewport {
   const scale = Math.min(availableWidth / FIELD_WIDTH, availableHeight / FIELD_HEIGHT)
   const cssWidth = Math.floor(FIELD_WIDTH * scale)
-  const cssHeight = Math.floor(FIELD_HEIGHT * scale)
-  const dpr = Math.min(devicePixelRatio, DPR_CAP)
+  // Derived from the width rather than floored independently. main.ts builds one
+  // uniform transform from pixelWidth, so a separately floored height can miss
+  // by a device pixel or two — a hairline unpainted strip along the bottom, or a
+  // clipped final row of the ground band.
+  const cssHeight = Math.round((cssWidth * FIELD_HEIGHT) / FIELD_WIDTH)
+  // Clamped below at 1 as well as above at DPR_CAP: a zoomed-out desktop browser
+  // reports a DPR under 1, which would otherwise give a backing store smaller
+  // than the CSS box and a visibly soft canvas.
+  const dpr = Math.min(Math.max(devicePixelRatio, 1), DPR_CAP)
+  const pixelWidth = Math.floor(cssWidth * dpr)
   return {
     cssWidth,
     cssHeight,
-    pixelWidth: Math.floor(cssWidth * dpr),
-    pixelHeight: Math.floor(cssHeight * dpr),
+    pixelWidth,
+    // Likewise derived, so pixelHeight is exactly what the uniform transform draws.
+    pixelHeight: Math.round((pixelWidth * FIELD_HEIGHT) / FIELD_WIDTH),
     scale,
     dpr,
   }
