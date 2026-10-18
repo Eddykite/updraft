@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unused-vars -- contract stub; remove when implemented */
 /**
  * Score, streak and multiplier (spec §2).
  *
@@ -10,14 +9,23 @@
  *
  * `multiplierFor` lives in state.ts because the HUD needs it too; the award
  * functions live here.
+ *
+ * **Which multiplier applies to a thermal.** The one you had when you took it,
+ * not the one it earns you: the award is paid at the current rate and *then* the
+ * streak (and possibly the multiplier) steps up. Collecting the thermal that
+ * takes you from 1× to 2× pays 5, and the next thing you score pays double.
+ * The spec fixes the two rules but not their order, so this is the choice, made
+ * once, here, and frozen by tests and the golden replay.
  */
+
+import { SCORE_PER_GATE, SCORE_PER_THERMAL } from './constants.js'
 
 /** Points for passing a gate at this multiplier. */
 export function gateAward(multiplier: number): number {
-  throw new Error('not implemented')
+  return SCORE_PER_GATE * multiplier
 }
 
 /** Points for collecting a thermal at this multiplier. */
 export function thermalAward(multiplier: number): number {
-  throw new Error('not implemented')
+  return SCORE_PER_THERMAL * multiplier
 }

@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unused-vars -- contract stub; remove when implemented */
 /**
  * Gate and thermal generation, and the reachability invariant (spec §2).
  *
@@ -15,19 +14,59 @@
  * plus that every gap sits inside field bounds and every thermal sits strictly
  * inside its gap (spec §3) — that test is what protects us against "unwinnable
  * run" bug reports.
+ *
+ * `T` is taken as `spawnInterval(elapsed)` — the interval at the moment the
+ * *later* gate is created. Because the interval only ever shrinks, that is the
+ * conservative choice: the player always has at least that long between the two
+ * gaps arriving.
  */
 
+import {
+  FIELD_WIDTH,
+  GAP_Y_MAX_EDGE,
+  GAP_Y_MIN,
+  MAX_CENTRE_DELTA_MAX,
+  MAX_CENTRE_DELTA_MIN,
+  NET_LIFT_ACCEL,
+  REACH_HEADROOM,
+  THERMAL_EDGE_INSET,
+  THERMAL_RADIUS,
+  VY_CLAMP,
+} from './constants.js'
+import { gapHeight, spawnInterval } from './difficulty.js'
 import type { Gate } from './state.js'
-import type { Rng } from './rng.js'
+import { nextBool, nextRange, type Rng } from './rng.js'
 
 /** Vertical distance the kite can cover and settle within time T, in px. Pure maths. */
 export function reach(seconds: number): number {
-  throw new Error('not implemented')
+  if (seconds <= 0) return 0
+  const a = NET_LIFT_ACCEL
+  const vmax = VY_CLAMP
+  // Triangular profile (never reaches the speed clamp) vs trapezoidal (does).
+  return vmax * vmax >= (a * seconds * vmax) / 2
+    ? (a * seconds * seconds) / 4
+    : vmax * seconds - (vmax * vmax) / a
 }
 
 /** The clamped limit on the change in gap centre between consecutive gates, in px. */
 export function maxCentreDelta(seconds: number): number {
-  throw new Error('not implemented')
+  const raw = REACH_HEADROOM * reach(seconds)
+  return Math.min(Math.max(raw, MAX_CENTRE_DELTA_MIN), MAX_CENTRE_DELTA_MAX)
+}
+
+/** The y of the middle of a gate's gap. */
+export function gapCentre(gate: Gate): number {
+  return gate.gapY + gate.gapHeight / 2
+}
+
+/** Lowest gap centre that keeps the whole gap inside the field, for this gap height. */
+export function minCentre(height: number): number {
+  return GAP_Y_MIN + height / 2
+}
+
+/** Highest gap centre that keeps the whole gap inside the field, for this gap height. */
+export function maxCentre(height: number): number {
+  return GAP_Y_MAX_EDGE - height / 2
 }
 
 /**
@@ -44,5 +83,46 @@ export function spawnGate(
   elapsed: number,
   previousCentre: number | null,
 ): [Rng, Gate] {
-  throw new Error('not implemented')
+  const height = gapHeight(elapsed)
+  const floor = minCentre(height)
+  const ceiling = maxCentre(height)
+
+  let low = floor
+  let high = ceiling
+  if (previousCentre !== null) {
+    const delta = maxCentreDelta(spawnInterval(elapsed))
+    low = Math.max(low, previousCentre - delta)
+    high = Math.min(high, previousCentre + delta)
+    if (low > high) {
+      // Only reachable if a caller hands us a previous centre that is already
+      // outside the legal band for this gap height. Field bounds win — place the
+      // gap as close to the previous centre as the field allows, which is still
+      // the most reachable gate available.
+      low = high = Math.min(Math.max(previousCentre, floor), ceiling)
+    }
+  }
+
+  const [afterCentre, centre] = nextRange(rng, low, high)
+  const [afterSide, below] = nextBool(afterCentre)
+
+  // The thermal hugs one edge of the gap but stays clear of it: the inset (45)
+  // is larger than the thermal radius (22), so the ring is always strictly
+  // inside the gap however tight the gap gets.
+  const offset = height / 2 - THERMAL_EDGE_INSET
+
+  return [
+    afterSide,
+    {
+      id,
+      x: FIELD_WIDTH,
+      gapY: centre - height / 2,
+      gapHeight: height,
+      thermal: {
+        y: centre + (below ? offset : -offset),
+        radius: THERMAL_RADIUS,
+        collected: false,
+      },
+      passed: false,
+    },
+  ]
 }

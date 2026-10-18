@@ -131,12 +131,26 @@ describe('event channel and pause helpers', () => {
 })
 
 describe('step', () => {
-  it('has the frozen signature and is not implemented yet', () => {
-    // The simulation task (GOK-3 follow-up) replaces this expectation with the
-    // physics, spawner, collision, scoring and determinism suites from spec §3.
+  it('still has the frozen signature', () => {
     expect(step).toHaveLength(3)
-    expect(() =>
-      step(createInitialState(1), { holding: false, confirmPressed: false }, C.FIXED_DT),
-    ).toThrowError('not implemented')
+  })
+
+  it('is implemented, and leaves the title screen alone until something is pressed', () => {
+    // The full simulation suites live in physics / spawner / collision /
+    // scoring / determinism / soak. This is only the shell-facing contract:
+    // step is callable, total, and does not start a run by itself.
+    const title = createInitialState(1)
+    const stepped = step(title, { holding: false, confirmPressed: false }, C.FIXED_DT)
+    expect(stepped).toBe(title)
+  })
+
+  it('starts a run on confirm and reports it through the event channel', () => {
+    const started = step(
+      createInitialState(1),
+      { holding: false, confirmPressed: true },
+      C.FIXED_DT,
+    )
+    expect(started.phase).toBe('playing')
+    expect(started.events).toEqual([{ type: 'run_started' }])
   })
 })
