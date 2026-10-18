@@ -117,6 +117,13 @@ export const MAX_CATCH_UP_STEPS = 5
 export const GAME_OVER_INPUT_LOCK = 0.4
 /** The "hold to climb" hint fades out after this many seconds of the first run. */
 export const HINT_FADE_SECONDS = 3
+/** How long the hint takes to fade once it starts, in seconds. */
+export const HINT_FADE_DURATION = 0.8
+/**
+ * How long the multiplier's grow-and-brighten takes to settle, in seconds.
+ * One pulse per step up — it grows, it does not flash (accessibility).
+ */
+export const MULTIPLIER_PULSE_SECONDS = 0.22
 /** Device pixel ratio is capped here when sizing the canvas. */
 export const DPR_CAP = 2
 /** Versioned localStorage key for the best score. Bump the suffix to invalidate. */
