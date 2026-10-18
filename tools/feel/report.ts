@@ -31,14 +31,21 @@
  * is measuring UPDRAFT rather than its own stability.
  */
 
-import { latencyFrames, playRun, type PlayerProfile, type RunResult } from './autopilot.js'
 import {
-  bestAchievableCost,
+  latencyFrames,
+  playRun,
+  safetyMargin,
+  type PlayerProfile,
+  type RunResult,
+} from './autopilot.js'
+import {
   costAcrossTheRamp,
-  opportunistKnee,
+  roundTrip,
+  DIP_DEPTHS,
   sampleCourse,
-  searchForRiskyPlacement,
+  searchForFreeCollect,
 } from './geometry.js'
+import { DIFFICULTY_RAMP_SECONDS } from '../../src/game/constants.js'
 
 const SEEDS = Array.from({ length: 200 }, (_, i) => 1000 + i * 7)
 /** Runs are cut off here; the difficulty ramp has been frozen for 2.5x this long by then. */
@@ -68,7 +75,8 @@ const COMPETENT = {
 /** The same hands, playing badly: barely leading the kite, reading it poorly. */
 const RUSTY = { ...COMPETENT, unanticipatedFrames: 3, perception: 28, aimJitter: 18 } as const
 
-const KNEE = opportunistKnee()
+/** Tolerances for the opportunist, in px of spare reach demanded at both ends. */
+const NERVES = [0, 20, 40] as const
 
 const PROFILES: ReadonlyArray<readonly [string, PlayerProfile]> = [
   ['safe / expert', { ...COMPETENT, strategy: 'safe', unanticipatedFrames: 0, perception: 0 }],
@@ -80,17 +88,18 @@ const PROFILES: ReadonlyArray<readonly [string, PlayerProfile]> = [
   ],
   ['collector / competent', { ...COMPETENT, strategy: 'collector' }],
   ['collector / rusty', { ...RUSTY, strategy: 'collector' }],
+  // The two ways to get the dip wrong, kept as profiles so "the depth matters" is
+  // measured rather than asserted — both bracket the collector's line.
+  ['skimmer / competent', { ...COMPETENT, strategy: 'skimmer' }],
   ['greedy / competent', { ...COMPETENT, strategy: 'greedy' }],
   ['greedy / rusty', { ...RUSTY, strategy: 'greedy' }],
-  // Both sides of the knee, because one side of it is all there is to say.
-  [
-    `opportunist <=${KNEE.floor.toFixed(0)}px`,
-    { ...COMPETENT, strategy: 'opportunist', riskTolerance: KNEE.floor },
-  ],
-  [
-    `opportunist >${KNEE.ceiling.toFixed(0)}px`,
-    { ...COMPETENT, strategy: 'opportunist', riskTolerance: KNEE.ceiling + 1 },
-  ],
+  ...NERVES.map(
+    (nerve) =>
+      [
+        `opportunist +${nerve}px`,
+        { ...COMPETENT, strategy: 'opportunist', riskTolerance: nerve },
+      ] as const,
+  ),
 ]
 
 function quantile(sorted: readonly number[], q: number): number {
@@ -206,14 +215,22 @@ console.log('\nWhere runs end (collector / competent):')
 deathHistogram(at('collector / competent'))
 
 console.log('\nRisk/reward — is a thermal a decision or a formality?')
+const declineRate = (label: string): string => {
+  const results = at(label)
+  const offered = sum(results.map((r) => r.ringsOffered))
+  return pct(sum(results.map((r) => r.ringsDeclined)), offered)
+}
 console.log(
-  `  The cheapest line that still collects always leaves the same clearance:\n` +
-    `  ${KNEE.ceiling.toFixed(0)}px while the gap is wider than ${KNEE.tightensBelowGap.toFixed(0)}px, falling to ` +
-    `${KNEE.floor.toFixed(0)}px at maximum difficulty.\n` +
-    `  So a player who declines rings below some nerve is a step function, not a dial:\n` +
-    `  every tolerance <=${KNEE.floor.toFixed(0)}px takes every ring, every tolerance >${KNEE.ceiling.toFixed(0)}px declines every\n` +
-    `  ring, and the two rows above are those two behaviours. There is no setting at which\n` +
-    `  a thermal is a judgement call.`,
+  `  A player who demands spare reach before committing now declines some rings and\n` +
+    `  takes others on the same run — the climb out of the dip is fixed by the ramp, but\n` +
+    `  the approach depends on where the previous gap left them:\n` +
+    NERVES.map(
+      (n) =>
+        `    +${String(n).padStart(2)}px of nerve: declines ${declineRate(`opportunist +${n}px`)} of the rings it is offered`,
+    ).join('\n') +
+    `\n  Under the old placement every one of those rows would have read 0% or 100%: the\n` +
+    `  quantity being tested was a constant, so the profile was a step function of its own\n` +
+    `  definition and quoting a number from inside one band was quoting an identity.`,
 )
 
 const safe = at('safe / competent')
@@ -224,49 +241,95 @@ const ringRate = (results: readonly RunResult[]): number => {
   const gates = sum(results.map((r) => r.gatesPassed))
   return gates === 0 ? 0 : (100 * sum(results.map((r) => r.thermalsTakenOnPassedGates))) / gates
 }
+const medianOf = (label: string): number =>
+  quantile(
+    [...at(label).map((r) => r.duration)].sort((a, b) => a - b),
+    0.5,
+  )
 console.log(
-  `\n  How much of the ring rate is bought by aiming for rings at all:\n` +
-    `  the safe line takes ${ringRate(safe).toFixed(0)}% of them without trying, the collector ${ringRate(collector).toFixed(0)}%, and a\n` +
-    `  frame-perfect collector still only ${ringRate(at('collector / expert')).toFixed(0)}%. That shortfall is not caution and not\n` +
-    `  reachability — greedy, which aims at the ring's centre, takes ${ringRate(at('greedy / competent')).toFixed(0)}% of the rings on\n` +
-    `  the gates it survives. It is that the collector flies the far edge of the collect\n` +
-    `  band, where any arrival error at all drops the ring. Greedy pays for its 100% by\n` +
-    `  dying at a median of ${quantile(
-      [...at('greedy / competent').map((r) => r.duration)].sort((a, b) => a - b),
-      0.5,
-    ).toFixed(0)}s.`,
+  `\n  Does the dip depth matter? Three fixed lines, from the ring's centre out to the\n` +
+    `  edge of the collect band:\n` +
+    `    skimmer (touches from the edge of the band) takes ${ringRate(at('skimmer / competent')).toFixed(0)}% of rings, median ${medianOf('skimmer / competent').toFixed(0)}s\n` +
+    `    collector (best depth)                        takes ${ringRate(collector).toFixed(0)}% of rings, median ${medianOf('collector / competent').toFixed(0)}s\n` +
+    `    greedy (commits to the ring's centre)         takes ${ringRate(at('greedy / competent')).toFixed(0)}% of rings, median ${medianOf('greedy / competent').toFixed(0)}s\n` +
+    `  and the safe line, which never leaves the gap, takes ${ringRate(safe).toFixed(0)}%.\n` +
+    `  Only the shallow end is punished, and it is punished twice: the skimmer touches the\n` +
+    `  ring only at the instant it is level with the kite, so it drops two rings in five, and\n` +
+    `  it still dies more often because that late contact leaves it the least room to climb\n` +
+    `  out. Between the ring's centre and half way there is nothing to choose — which is\n` +
+    `  worth saying plainly, because the opposite was the tidier story.`,
 )
 console.log(
   `\n  What it pays, per gate flown rather than per run (runs are censored, gates are not):\n` +
     `  safe ${pointsPerGate(safe).toFixed(1)} points/gate vs collector ${pointsPerGate(collector).toFixed(1)}` +
     ` — ${(pointsPerGate(collector) / Math.max(0.001, pointsPerGate(safe))).toFixed(2)}x.\n` +
-    `  What it costs is in the rate table, and at the competent operating point it is not\n` +
-    `  distinguishable from zero. The one real cost in the reward layer is over-committing:\n` +
-    `  compare greedy, which aims at the ring's centre instead of its nearest edge.`,
+    `  The multiplier is why the ratio is not 1.5x: the streak runs on consecutive rings, so\n` +
+    `  a player who never leaves the safe line is stuck at 1x for an entire run.\n` +
+    `\n  And yet the safe line still wins on total score, which is the finding that matters:\n` +
+    `  safe ${(sum(safe.map((r) => r.score)) / safe.length).toFixed(0)} points per run against collector ${(sum(collector.map((r) => r.score)) / collector.length).toFixed(0)}. Per *second* the collector is far\n` +
+    `  ahead (${(sum(collector.map((r) => r.score)) / sum(collector.map((r) => r.duration))).toFixed(1)} vs ${(sum(safe.map((r) => r.score)) / sum(safe.map((r) => r.duration))).toFixed(1)} points/s), and it loses only because a safe run has no end:\n` +
+    `  the ramp freezes at ${DIFFICULTY_RAMP_SECONDS}s and the frozen course is flyable forever, so the safe line's\n` +
+    `  score is bounded by the player's patience and nothing else. No risk/reward layer can\n` +
+    `  be rational against an unbounded run — that is arithmetic, not tuning, and it is the\n` +
+    `  difficulty-ceiling question on GOK-5, not the thermals one.`,
 )
 
 console.log('\nCourse geometry — no autopilot involved:')
 console.log(costAcrossTheRamp())
 
 const course = SEEDS.slice(0, 50).flatMap((seed) => sampleCourse(seed, 180))
-const free = course.filter((g) => g.marginCost <= 0).length
+const free = course.filter((g) => g.freeCollect > 0).length
 console.log(
-  `\n  Over ${course.length} spawned gates: the gap's own centre line already collects the ring on\n` +
-    `  ${pct(free, course.length)} of them, and the average margin given up across all of them is ` +
-    `${mean(course.map((g) => g.marginCost)).toFixed(1)}px\n  out of ${mean(course.map((g) => g.clearanceOnCentre)).toFixed(1)}px available.`,
+  `\n  Over ${course.length} spawned gates: the number on which some already-safe altitude collects\n` +
+    `  the ring is ${free}, and the average excursion past the safe band is ` +
+    `${mean(course.map((g) => g.excursion)).toFixed(1)}px\n  against ${mean(course.map((g) => g.clearanceOnCentre)).toFixed(1)}px of clearance on the centre line.`,
 )
 
-const search = searchForRiskyPlacement()
 console.log(
-  `\n  Can retuning fix it? Swept ${search.tested.toLocaleString()} (gap, ring radius, position) combinations:\n` +
-    `  ${search.risky} admit a ring that cannot be collected from a surviving altitude at all.`,
+  `\n  The three lines, at maximum difficulty — the budget is the open air between two\n` +
+    `  gates, ${roundTrip(DIFFICULTY_RAMP_SECONDS, DIP_DEPTHS.collector).spacing.toFixed(0)}px of it, and THERMAL_LEAD_X decides how it splits:\n` +
+    (['greedy', 'collector', 'skimmer'] as const)
+      .map((k) => {
+        const t = roundTrip(DIFFICULTY_RAMP_SECONDS, DIP_DEPTHS[k])
+        return (
+          `    ${k.padEnd(9)} dip ${DIP_DEPTHS[k].toFixed(0).padStart(2)}px short of the ring: ` +
+          `${t.travel.toFixed(0)}px each way, slack ${t.slack.toFixed(0).padStart(4)}px, ` +
+          `contact window ${t.contactWindow.toFixed(0)}px of scroll`
+        )
+      })
+      .join('\n') +
+    `\n  Conservative — it throws away the speed the kite carries through the dip — so read it\n` +
+    `  as the shape of the trade, not as the exact width of the window.`,
 )
-const achievable = bestAchievableCost()
+
 console.log(
-  `  Relaxing that to merely *expensive*, at the ${achievable.gap.toFixed(0)}px endgame gap ` +
-    `(${achievable.marginOnCentre.toFixed(0)}px of margin on the centre line):\n` +
-    `    keeping THERMAL_RADIUS at ${22}: best cost ${achievable.atCurrentRadius.cost.toFixed(0)}px, ` +
-    `at inset ${achievable.atCurrentRadius.inset} (ring ${achievable.atCurrentRadius.ringToColumn}px off the column)\n` +
-    `    free to shrink the ring: best cost ${achievable.best.cost.toFixed(0)}px, at radius ` +
-    `${achievable.best.radius} / inset ${achievable.best.inset} (ring ${achievable.best.ringToColumn}px off the column)`,
+  `\n  How much of the above is the model player's own caution? The lean toward the next\n` +
+    `  ring stops this far short of the column, and it is most of the approach:\n` +
+    [4, 12, safetyMargin({ ...COMPETENT, strategy: 'collector' }), 30, 45]
+      .map((margin) => {
+        const runs = SEEDS.map((seed) =>
+          playRun(seed, { ...COMPETENT, strategy: 'collector', leanMargin: margin }, MAX_SECONDS),
+        )
+        const gates = sum(runs.map((r) => r.gatesPassed))
+        const deaths = runs.filter((r) => r.crashCause !== null).length
+        const taken = sum(runs.map((r) => r.thermalsTakenOnPassedGates))
+        return (
+          `    lean margin ${margin.toFixed(0).padStart(2)}px: ` +
+          `deaths per 100 gates ${((100 * deaths) / Math.max(1, gates)).toFixed(2).padStart(6)}, ` +
+          `rings ${pct(taken, gates).padStart(4)} of gates`
+        )
+      })
+      .join('\n') +
+    `\n  The derived margin is the middle row. The trend is the honest reading: the cost of a\n` +
+    `  ring is partly the player's own caution, and a bolder line buys rings at a price.`,
+)
+
+const search = searchForFreeCollect()
+console.log(
+  `\n  Is the mechanic an accident of today's constants? Swept ${search.tested.toLocaleString()} (gap, ring radius,\n` +
+    `  offset) combinations across both sides of the threshold:\n` +
+    `    ring inside the gap  (offset <= radius): ${search.riskyInside} of them deny a safe collecting altitude\n` +
+    `    ring outside the gap (offset >  radius): ${search.freeOutside} of them allow one\n` +
+    `  So the layer turns on one inequality, THERMAL_OUTSIDE_OFFSET > THERMAL_RADIUS, and on\n` +
+    `  nothing else — not on the gap height, not on where we are on the ramp.`,
 )

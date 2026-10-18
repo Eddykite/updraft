@@ -43,7 +43,7 @@ src/
     state.ts             GameState, InputState, events[], createInitialState(seed)
     update.ts            step(state, input, dt) -> GameState   (the whole simulation)
     physics.ts           kite integration, velocity and position clamps
-    spawner.ts           gate + thermal generation, reachability invariant
+    spawner.ts           gate + thermal placement, reachability invariant
     collision.ts         circle-vs-rect, circle-vs-circle
     scoring.ts           score, streak, multiplier
     difficulty.ts        speed / gap / interval as pure functions of elapsed time

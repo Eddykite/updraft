@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
+  CEILING_Y,
   FIELD_WIDTH,
   FIRST_GATE_DELAY,
+  GATE_SPAWN_X,
+  GROUND_Y,
   GAP_Y_MAX_EDGE,
   GAP_Y_MIN,
   KITE_START_Y,
@@ -9,6 +12,7 @@ import {
   MAX_CENTRE_DELTA_MIN,
   NET_LIFT_ACCEL,
   REACH_HEADROOM,
+  THERMAL_OUTSIDE_OFFSET,
   THERMAL_RADIUS,
   VY_CLAMP,
 } from '../src/game/constants.js'
@@ -21,17 +25,24 @@ import {
   minCentre,
   reach,
   spawnGate,
+  thermalY,
 } from '../src/game/spawner.js'
-import type { Gate } from '../src/game/state.js'
+import { thermalX, type Gate } from '../src/game/state.js'
 
 /**
  * Spawner (spec §3).
  *
  * The headline test is the property test at the bottom: 10,000 seeds, every
  * consecutive gate pair reachable, every gap inside the field, every thermal
- * strictly inside its gap. It is the thing standing between us and "unwinnable
- * run" bug reports, so it runs over the same schedule update.ts uses rather than
- * over a convenient one.
+ * strictly *outside* its gap and in open air. It is the thing standing between us
+ * and "unwinnable run" bug reports, so it runs over the same schedule update.ts
+ * uses rather than over a convenient one.
+ *
+ * The thermal half of that invariant inverted on 2026-10-18 (GOK-5): a ring
+ * strictly inside its gap was always collectible from an altitude that already
+ * cleared the columns, so the risk/reward layer did not exist. Note what did NOT
+ * change — the fairness rule is about the gaps, and rings are optional, so a ring
+ * the player judges unreachable is a ring they decline, not an unflyable course.
  */
 
 const SEEDS = 10_000
@@ -114,10 +125,13 @@ describe('maxCentreDelta', () => {
 })
 
 describe('spawnGate', () => {
-  it('spawns at the right-hand edge, unpassed, with an uncollected thermal', () => {
+  it('spawns off the right-hand edge, unpassed, with an uncollected thermal', () => {
     const [, gate] = spawnGate(createRng(42), 7, 0, null)
     expect(gate.id).toBe(7)
-    expect(gate.x).toBe(FIELD_WIDTH)
+    // Far enough out that the ring, which leads the gate, enters at FIELD_WIDTH
+    // rather than appearing in the middle of the screen.
+    expect(gate.x).toBe(GATE_SPAWN_X)
+    expect(thermalX(gate)).toBe(FIELD_WIDTH)
     expect(gate.passed).toBe(false)
     expect(gate.thermal.collected).toBe(false)
     expect(gate.thermal.radius).toBe(THERMAL_RADIUS)
@@ -134,7 +148,16 @@ describe('spawnGate', () => {
     expect(second.gapY).not.toBe(first.gapY)
   })
 
-  it('puts the thermal on one side of the gap or the other, by RNG', () => {
+  it('hangs the thermal off the edge the kite is coming from', () => {
+    // Previous gap above this one: the kite arrives from above, so the ring is on
+    // the gap's upper edge, on the way in rather than across the course.
+    const [, fromAbove] = spawnGate(createRng(5), 0, 0, 200)
+    expect(fromAbove.thermal.y).toBeLessThan(fromAbove.gapY)
+    const [, fromBelow] = spawnGate(createRng(5), 0, 0, 800)
+    expect(fromBelow.thermal.y).toBeGreaterThan(fromBelow.gapY + fromBelow.gapHeight)
+  })
+
+  it('falls back to the RNG only when there is no side to come from', () => {
     const sides = new Set<string>()
     let rng = createRng(5)
     for (let i = 0; i < 20; i += 1) {
@@ -143,6 +166,27 @@ describe('spawnGate', () => {
       sides.add(gate.thermal.y > gapCentre(gate) ? 'below' : 'above')
     }
     expect(sides).toEqual(new Set(['above', 'below']))
+  })
+
+  /**
+   * The flip. A ring is pushed to the other edge when its own side would put it
+   * off the field — near the top and bottom of the legal band. It can never need
+   * flipping twice: that would take a gap taller than
+   * THERMAL_Y_MAX - THERMAL_Y_MIN - 2*THERMAL_OUTSIDE_OFFSET = 776px, against a
+   * widest gap of 260. Swept rather than argued.
+   */
+  it('keeps every ring in open air, for every gap the game can produce', () => {
+    for (let elapsed = 0; elapsed <= 120; elapsed += 1) {
+      const height = gapHeight(elapsed)
+      for (let centre = minCentre(height); centre <= maxCentre(height); centre += 1) {
+        for (const below of [true, false]) {
+          const y = thermalY(centre, height, below)
+          expect(Math.abs(y - centre)).toBeCloseTo(height / 2 + THERMAL_OUTSIDE_OFFSET, 9)
+          expect(y - THERMAL_RADIUS).toBeGreaterThanOrEqual(CEILING_Y)
+          expect(y + THERMAL_RADIUS).toBeLessThanOrEqual(GROUND_Y)
+        }
+      }
+    }
   })
 
   it('honours the reachability limit against the previous centre', () => {
@@ -221,16 +265,26 @@ describe(`the fairness rule holds over ${SEEDS.toLocaleString('en-US')} seeds`, 
           GAP_Y_MAX_EDGE - gapBottom,
         )
 
-        // 3. The thermal ring is strictly inside the gap — reachable without
-        //    having to clip a column to touch it.
-        const clearance = Math.min(
-          gate.thermal.y - gate.thermal.radius - gate.gapY,
-          gapBottom - (gate.thermal.y + gate.thermal.radius),
+        // 3. The thermal ring is strictly OUTSIDE the gap, and in open air. The
+        //    clearance here is daylight between the ring and the gap it hides
+        //    beside — the thing that makes collecting cost something.
+        const clearance = Math.max(
+          gate.gapY - (gate.thermal.y + gate.thermal.radius),
+          gate.thermal.y - gate.thermal.radius - gapBottom,
         )
         if (clearance <= 0) {
           throw new Error(
             `seed ${seed}, gate ${gate.id}: thermal at ${gate.thermal.y.toFixed(2)} is not ` +
-              `inside gap [${gate.gapY.toFixed(2)}, ${gapBottom.toFixed(2)}]`,
+              `outside gap [${gate.gapY.toFixed(2)}, ${gapBottom.toFixed(2)}]`,
+          )
+        }
+        if (
+          gate.thermal.y - gate.thermal.radius < CEILING_Y ||
+          gate.thermal.y + gate.thermal.radius > GROUND_Y
+        ) {
+          throw new Error(
+            `seed ${seed}, gate ${gate.id}: thermal at ${gate.thermal.y.toFixed(2)} is not ` +
+              `in open air`,
           )
         }
         worstThermalClearance = Math.min(worstThermalClearance, clearance)
@@ -244,7 +298,9 @@ describe(`the fairness rule holds over ${SEEDS.toLocaleString('en-US')} seeds`, 
     expect(worstDeltaRatio).toBeGreaterThan(0.9)
     expect(worstDeltaRatio).toBeLessThanOrEqual(1)
     expect(tightestGapMargin).toBeLessThan(1)
-    // 45 px inset minus the 22 px ring: 23 px of clearance at the tightest gap.
-    expect(worstThermalClearance).toBeCloseTo(THERMAL_RADIUS + 1, 9)
+    // The 40 px offset minus the 22 px ring: 18 px of daylight between every ring
+    // and its gap, at every difficulty. It is a constant because the gap height
+    // cancels — which is exactly why no point on the ramp makes collecting free.
+    expect(worstThermalClearance).toBeCloseTo(THERMAL_OUTSIDE_OFFSET - THERMAL_RADIUS, 9)
   })
 })

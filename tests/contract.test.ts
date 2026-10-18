@@ -45,7 +45,12 @@ describe('constants match the signed-off spec §2 table', () => {
     expect(C.GAP_Y_MIN).toBe(80)
     expect(C.GAP_Y_MAX_EDGE).toBe(870)
     expect(C.THERMAL_RADIUS).toBe(22)
-    expect(C.THERMAL_EDGE_INSET).toBe(45)
+    // Spec revision 2026-10-18 (GOK-5): the ring moved outside the gap. The
+    // mechanic is exactly `THERMAL_OUTSIDE_OFFSET > THERMAL_RADIUS`.
+    expect(C.THERMAL_OUTSIDE_OFFSET).toBe(40)
+    expect(C.THERMAL_OUTSIDE_OFFSET).toBeGreaterThan(C.THERMAL_RADIUS)
+    expect(C.THERMAL_LEAD_X).toBe(110)
+    expect(C.GATE_SPAWN_X).toBe(C.FIELD_WIDTH + C.THERMAL_LEAD_X)
     expect(C.FIRST_GATE_DELAY).toBe(1.2)
   })
 

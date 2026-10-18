@@ -7,6 +7,7 @@ import {
   MULTIPLIER_CAP,
   SCORE_PER_GATE,
   SCORE_PER_THERMAL,
+  THERMAL_LEAD_X,
   THERMAL_RADIUS,
 } from '../src/game/constants.js'
 import { gateAward, thermalAward } from '../src/game/scoring.js'
@@ -28,7 +29,13 @@ const RELEASED = { holding: false, confirmPressed: false } as const
  */
 const STILL = 0
 
-/** A gate placed so that its thermal is exactly on the kite, about to be passed. */
+/**
+ * A gate, with its gap and ring placed by hand rather than by the spawner: these
+ * scenarios isolate the scoring rules, so the geometry is whatever makes the
+ * rule under test exact. `RING_ON_THE_KITE` is the x that puts this gate's ring
+ * exactly on the kite — the ring rides THERMAL_LEAD_X *ahead* of the gate since
+ * the 2026-10-18 revision, so it is well to the right of the columns.
+ */
 function gateAt(x: number, overrides: Partial<Gate> = {}): Gate {
   return {
     id: 0,
@@ -40,6 +47,9 @@ function gateAt(x: number, overrides: Partial<Gate> = {}): Gate {
     ...overrides,
   }
 }
+
+/** The gate x that puts its ring exactly on the kite. */
+const RING_ON_THE_KITE = KITE_X + THERMAL_LEAD_X
 
 /** The gate under test. Indexing is checked, so this keeps the assertions readable. */
 function onlyGate(state: GameState): Gate {
@@ -85,7 +95,7 @@ describe('multiplier ladder', () => {
 describe('collecting a thermal', () => {
   it('scores at the multiplier you had going in, then steps the streak up', () => {
     // streak 1 -> 2 is the step that takes the multiplier from 1x to 2x.
-    const before = playing([gateAt(KITE_X - GATE_WIDTH / 2)], { streak: 1, multiplier: 1 })
+    const before = playing([gateAt(RING_ON_THE_KITE)], { streak: 1, multiplier: 1 })
     const after = step(before, RELEASED, STILL)
 
     expect(after.score).toBe(5) // paid at 1x, not at the 2x it just earned
@@ -99,14 +109,14 @@ describe('collecting a thermal', () => {
   })
 
   it('does not announce a multiplier step on the thermals between steps', () => {
-    const before = playing([gateAt(KITE_X - GATE_WIDTH / 2)], { streak: 0, multiplier: 1 })
+    const before = playing([gateAt(RING_ON_THE_KITE)], { streak: 0, multiplier: 1 })
     const after = step(before, RELEASED, STILL)
     expect(after.multiplier).toBe(1)
     expect(after.events).toEqual([{ type: 'thermal_collected', gateId: 0, points: 5 }])
   })
 
   it('collects each thermal exactly once', () => {
-    let state = playing([gateAt(KITE_X - GATE_WIDTH / 2)])
+    let state = playing([gateAt(RING_ON_THE_KITE)])
     state = step(state, RELEASED, STILL)
     const afterFirst = state.score
     state = step({ ...state, events: [] }, RELEASED, STILL)
@@ -116,7 +126,7 @@ describe('collecting a thermal', () => {
   })
 
   it('stops paying more at the cap', () => {
-    const before = playing([gateAt(KITE_X - GATE_WIDTH / 2)], { streak: 20, multiplier: 5 })
+    const before = playing([gateAt(RING_ON_THE_KITE)], { streak: 20, multiplier: 5 })
     const after = step(before, RELEASED, STILL)
     expect(after.multiplier).toBe(MULTIPLIER_CAP)
     expect(after.score).toBe(25)
@@ -202,7 +212,7 @@ describe('a whole scoring sequence', () => {
       state = {
         ...state,
         events: [],
-        gates: [gateAt(KITE_X - GATE_WIDTH / 2, { id: index })],
+        gates: [gateAt(RING_ON_THE_KITE, { id: index })],
       }
       state = step(state, RELEASED, STILL)
       expected += thermalPoints
@@ -227,7 +237,7 @@ describe('a whole scoring sequence', () => {
   it('scores the same way when the world is actually scrolling past', () => {
     // The same gate, approached at the real timestep: it is collected on the way
     // through and banked once its trailing edge clears the kite.
-    let state = playing([gateAt(KITE_X + 40, { gapY: 100, gapHeight: 700 })])
+    let state = playing([gateAt(RING_ON_THE_KITE + 40, { gapY: 100, gapHeight: 700 })])
     const seen: string[] = []
     for (let tick = 0; tick < 120 && state.phase === 'playing'; tick += 1) {
       state = step({ ...state, events: [] }, RELEASED, FIXED_DT)

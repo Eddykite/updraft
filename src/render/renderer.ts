@@ -31,7 +31,7 @@ import {
   KITE_X,
   VY_CLAMP,
 } from '../game/constants.js'
-import type { Gate, GameState, Kite } from '../game/state.js'
+import { thermalX, type Gate, type GameState, type Kite } from '../game/state.js'
 import { PALETTE } from './palette.js'
 
 /** Per-frame values that are not part of the simulation: wall clock and interpolation. */
@@ -135,6 +135,11 @@ function drawHills(
  * screen, they are solid rectangles (no other object in the game is), and each
  * one carries a hatched band and a bright rule on the edge that faces the gap —
  * so the lethal edge reads as an edge by shape and value alone.
+ *
+ * The gate's ring is drawn here too, but it is nowhere near the gap: it floats in
+ * the open air ahead of the columns, lined up with one of them. That misalignment
+ * is the mechanic made visible — the ring is at an altitude the wall is about to
+ * occupy, so reading "that is behind the wall" is the whole decision.
  */
 function drawGate(ctx: CanvasRenderingContext2D, gate: Gate, time: number): void {
   const gapBottom = gate.gapY + gate.gapHeight
@@ -142,7 +147,7 @@ function drawGate(ctx: CanvasRenderingContext2D, gate: Gate, time: number): void
   column(ctx, gate.x, gapBottom, GROUND_Y - gapBottom, false)
 
   if (!gate.thermal.collected) {
-    drawThermal(ctx, gate.x + GATE_WIDTH / 2, gate.thermal.y, gate.thermal.radius, time)
+    drawThermal(ctx, thermalX(gate), gate.thermal.y, gate.thermal.radius, time)
   }
 }
 

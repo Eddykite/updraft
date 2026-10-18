@@ -98,14 +98,28 @@ export async function logicalPoint(
  * that real key and touch events reach the simulation, and that nothing a run
  * does destroys a stored best. This tape just makes the game-over screenshot
  * show a game someone played, when the machine is quiet enough.
+ *
+ * Re-derived on 2026-10-18 when the thermals moved outside the gaps (GOK-5): the
+ * old schedule flew into the first column of the revised course and scored zero
+ * on every machine, quiet or not. The search that produced this one is
+ * `tools/feel/scoring-tape.ts`; it keeps the best *worst case* rather than the
+ * best run, which is why the number it scores is small.
  */
-export const SCORING_TAPE = [513, 351, 551, 544, 482, 485, 442, 468, 325] as const
+export const SCORING_TAPE = [739, 649, 865, 520, 249, 360, 621, 713, 300] as const
 
 /**
  * Play the tape from the title screen, then let go and wait for the crash.
  * Returns the final score, which may legitimately be 0 — see SCORING_TAPE.
+ *
+ * `afterPhase` runs between phases, while the kite is still in the air. It is
+ * there so a caller can photograph a run in progress rather than an empty sky:
+ * the first gate is still 1.2 s away when the run starts, so a screenshot taken
+ * on the transition into `playing` shows nothing anyone can judge.
  */
-export async function flyAndCrash(page: Page): Promise<number> {
+export async function flyAndCrash(
+  page: Page,
+  afterPhase?: (index: number) => Promise<void>,
+): Promise<number> {
   await page.keyboard.press('Space')
   await expect(page.locator('html')).toHaveAttribute('data-updraft-phase', 'playing')
 
@@ -114,6 +128,7 @@ export async function flyAndCrash(page: Page): Promise<number> {
     else await page.keyboard.up('Space')
     await page.waitForTimeout(duration)
     if ((await phase(page)) !== 'playing') break
+    await afterPhase?.(index)
   }
   await page.keyboard.up('Space')
 

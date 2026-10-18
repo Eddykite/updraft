@@ -81,15 +81,18 @@ test('a deliberate crash reaches game over with the score shown', async ({ page 
   const errors = watchConsole(page)
   await openGame(page)
 
-  await page.keyboard.press('Space')
-  await expect(page.locator('html')).toHaveAttribute('data-updraft-phase', 'playing')
-  await captureScene(page, testInfo, 'playing')
-
   // Fly the tape rather than just letting go, so the game-over card captured
   // here is a screenshot of a game someone played. Nothing is asserted about the
   // score it reaches — see SCORING_TAPE in game.ts for why a browser cannot
   // promise one, and tests/playable.test.ts for where that *is* proved.
-  const finalScore = await flyAndCrash(page)
+  //
+  // The `playing` shot is taken a few phases in, with gates and a ring on
+  // screen. Taken on the transition instead it is a picture of empty sky, which
+  // is what it was until the thermals moved and the screenshot had to show
+  // where they moved to.
+  const finalScore = await flyAndCrash(page, async (index) => {
+    if (index === 2) await captureScene(page, testInfo, 'playing')
+  })
   await captureScene(page, testInfo, 'gameover')
 
   expect(finalScore).toBeGreaterThanOrEqual(0)

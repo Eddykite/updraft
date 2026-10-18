@@ -7,7 +7,7 @@
  */
 
 import { FIELD_HEIGHT, GATE_WIDTH, KITE_RADIUS, KITE_X } from './constants.js'
-import type { Gate, Kite } from './state.js'
+import { thermalX, type Gate, type Kite } from './state.js'
 
 /** Circle vs axis-aligned rectangle. Touching counts as overlapping. */
 export function circleIntersectsRect(
@@ -42,11 +42,6 @@ export function circlesIntersect(
   return dx * dx + dy * dy <= reach * reach
 }
 
-/** The x of a gate's vertical centre line, where its thermal rides. */
-export function gateCentreX(gate: Gate): number {
-  return gate.x + GATE_WIDTH / 2
-}
-
 /** True when the kite overlaps either column of this gate (fatal). */
 export function hitsGateColumns(kite: Kite, gate: Gate): boolean {
   const gapBottom = gate.gapY + gate.gapHeight
@@ -69,14 +64,22 @@ export function hitsGateColumns(kite: Kite, gate: Gate): boolean {
   )
 }
 
-/** True when the kite overlaps this gate's uncollected thermal. */
+/**
+ * True when the kite overlaps this gate's uncollected thermal.
+ *
+ * The ring rides ahead of the gate in open air (spawner.ts), so this is a real
+ * two-dimensional test: the kite has a window of a few frames as the ring sweeps
+ * past, and the further it is from the ring's altitude the narrower that window
+ * gets. Reaching from the very edge of the collect band only works at the one
+ * instant the ring is level with the kite.
+ */
 export function touchesThermal(kite: Kite, gate: Gate): boolean {
   if (gate.thermal.collected) return false
   return circlesIntersect(
     KITE_X,
     kite.y,
     KITE_RADIUS,
-    gateCentreX(gate),
+    thermalX(gate),
     gate.thermal.y,
     gate.thermal.radius,
   )

@@ -107,7 +107,7 @@ describe('derived draws', () => {
     expect(seen).toEqual(new Set([3, 4, 5, 6]))
   })
 
-  it('nextBool is roughly fair — thermals pick a gap edge with it', () => {
+  it('nextBool is roughly fair — thermals break a tie between gap edges with it', () => {
     let rng = createRng(2024)
     let heads = 0
     const flips = 10_000

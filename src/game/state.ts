@@ -19,6 +19,7 @@ import {
   KITE_START_Y,
   MULTIPLIER_CAP,
   STREAK_PER_MULTIPLIER,
+  THERMAL_LEAD_X,
 } from './constants.js'
 
 /** The scene machine's state, owned by the simulation. app/scenes.ts reads it. */
@@ -46,10 +47,13 @@ export interface Kite {
 }
 
 /**
- * The updraft ring inside a gate's gap.
+ * The updraft ring a gate carries, in the open air ahead of it.
  *
- * It has no x of its own: it rides at the gate's horizontal centre
- * (`gate.x + GATE_WIDTH / 2`). `y` is absolute in field coordinates.
+ * It has no x of its own: it rides `THERMAL_LEAD_X` px ahead of its gate's
+ * leading edge, so the two cannot drift apart — see `thermalX`. `y` is absolute
+ * in field coordinates, and sits strictly *outside* the gap (spec §3, revised
+ * 2026-10-18): collecting the ring always means leaving the line that clears the
+ * columns, and then getting back.
  */
 export interface Thermal {
   readonly y: number
@@ -71,6 +75,20 @@ export interface Gate {
   readonly thermal: Thermal
   /** Set once the gate's trailing edge is behind the kite and it has been scored. */
   readonly passed: boolean
+}
+
+/**
+ * Where this gate's ring is, horizontally. Derived rather than stored, so there
+ * is exactly one thing to scroll and the ring can never desynchronise from the
+ * gate it belongs to.
+ *
+ * Ahead of the gate, so the ring is always resolved — taken or gone — before its
+ * gate is scored. That ordering is what keeps the streak rule meaning what it
+ * says: by the time a gate counts as passed, whether its ring was collected is
+ * already settled.
+ */
+export function thermalX(gate: Pick<Gate, 'x'>): number {
+  return gate.x - THERMAL_LEAD_X
 }
 
 /**

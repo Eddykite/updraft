@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
   CEILING_Y,
-  FIELD_WIDTH,
   FIXED_DT,
   GAP_Y_MAX_EDGE,
   GAP_Y_MIN,
+  GATE_SPAWN_X,
   GATE_WIDTH,
   GROUND_Y,
   MULTIPLIER_CAP,
@@ -76,14 +76,22 @@ function checkInvariants(state: GameState, seed: number, tick: number): void {
     if (gate.id <= previousId) fail('gates are not in spawn order')
     previousId = gate.id
     if (gate.x + GATE_WIDTH < 0) fail(`gate ${gate.id} was kept after leaving the field`)
-    if (gate.x > FIELD_WIDTH) fail(`gate ${gate.id} is beyond the right edge`)
+    if (gate.x > GATE_SPAWN_X) fail(`gate ${gate.id} is beyond its spawn point`)
     if (gate.gapY < GAP_Y_MIN - 1e-9) fail(`gate ${gate.id} gap starts above the legal band`)
     if (gate.gapY + gate.gapHeight > GAP_Y_MAX_EDGE + 1e-9) {
       fail(`gate ${gate.id} gap ends below the legal band`)
     }
-    const insideTop = gate.thermal.y - gate.thermal.radius > gate.gapY
-    const insideBottom = gate.thermal.y + gate.thermal.radius < gate.gapY + gate.gapHeight
-    if (!insideTop || !insideBottom) fail(`gate ${gate.id} thermal is not inside its gap`)
+    // Spec §3 as revised (GOK-5): strictly OUTSIDE the gap, so collecting always
+    // means leaving the band that clears the columns.
+    const above = gate.thermal.y + gate.thermal.radius < gate.gapY
+    const below = gate.thermal.y - gate.thermal.radius > gate.gapY + gate.gapHeight
+    if (!above && !below) fail(`gate ${gate.id} thermal is not outside its gap`)
+    if (gate.thermal.y - gate.thermal.radius < CEILING_Y) {
+      fail(`gate ${gate.id} thermal is above the ceiling`)
+    }
+    if (gate.thermal.y + gate.thermal.radius > GROUND_Y) {
+      fail(`gate ${gate.id} thermal is in the ground`)
+    }
   }
 }
 

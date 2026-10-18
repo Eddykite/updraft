@@ -1,18 +1,20 @@
 import { describe, expect, it } from 'vitest'
 import { latencyFrames, playRun, type PlayerProfile } from '../tools/feel/autopilot.js'
-import { opportunistKnee, sampleCourse, searchForRiskyPlacement } from '../tools/feel/geometry.js'
+import { DIP_DEPTHS, sampleCourse, searchForFreeCollect } from '../tools/feel/geometry.js'
 import {
   CEILING_Y,
   DIFFICULTY_RAMP_SECONDS,
   FIXED_DT,
   GAP_Y_MIN,
+  GATE_WIDTH,
   KITE_RADIUS,
-  THERMAL_EDGE_INSET,
+  KITE_X,
+  THERMAL_OUTSIDE_OFFSET,
   THERMAL_RADIUS,
 } from '../src/game/constants.js'
-import { gapHeight } from '../src/game/difficulty.js'
 import { DEFAULT_SEED as E2E_SEED, SCORING_TAPE } from '../e2e/game.js'
-import { createInitialState } from '../src/game/state.js'
+import { createInitialState, thermalX } from '../src/game/state.js'
+import { flyTape, mulberry } from '../tools/feel/tape.js'
 import { step } from '../src/game/update.js'
 
 /**
@@ -30,7 +32,7 @@ import { step } from '../src/game/update.js'
  */
 
 const FRAME_PERFECT: PlayerProfile = {
-  strategy: 'collector',
+  strategy: 'safe',
   latency: 0,
   deadZone: 0,
   unanticipatedFrames: 0,
@@ -41,9 +43,36 @@ const FRAME_PERFECT: PlayerProfile = {
 
 const SEEDS = [20261018, 1234, 7, 999_983, 42]
 
+/** The hands the feel report calls competent, flying the safe line. */
+const COMPETENT: PlayerProfile = {
+  strategy: 'safe',
+  latency: 0.083,
+  deadZone: 8,
+  unanticipatedFrames: 1,
+  aimJitter: 10,
+  perception: 16,
+  riskTolerance: 0,
+}
+
+/** The same hands, going for every ring — the player the risk layer is aimed at. */
+const COMPETENT_COLLECTOR: PlayerProfile = { ...COMPETENT, strategy: 'collector' }
+
 describe('the course is flyable', () => {
+  /**
+   * Flyable is a claim about the *gaps*, and after the 2026-10-18 revision it is
+   * only about the gaps: the rings are outside them now, so going for one is a
+   * choice the player makes and a ring they cannot safely reach is a ring they
+   * decline. What must never happen is the course killing someone who declines
+   * every one of them — so both of these fly the safe line.
+   */
   it.each(SEEDS)('a frame-perfect player survives 120 s on seed %i', (seed) => {
     const result = playRun(seed, FRAME_PERFECT, 120)
+    expect(result.crashCause).toBeNull()
+    expect(result.duration).toBeGreaterThanOrEqual(120)
+  })
+
+  it.each(SEEDS)('and so does a competent one, with hands that shake, on seed %i', (seed) => {
+    const result = playRun(seed, COMPETENT, 120)
     expect(result.crashCause).toBeNull()
     expect(result.duration).toBeGreaterThanOrEqual(120)
   })
@@ -51,7 +80,18 @@ describe('the course is flyable', () => {
   it('and scores on the way — a run is not just survival', () => {
     const result = playRun(20261018, FRAME_PERFECT, 120)
     expect(result.gatesPassed).toBeGreaterThan(50)
-    expect(result.peakMultiplier).toBe(5)
+  })
+
+  /**
+   * The multiplier is the reward layer's and nothing else's: the streak counts
+   * consecutive rings, so the safe line flies a whole run at 1x and only someone
+   * leaving the gap can reach the cap. That is the entire economic argument for
+   * taking a risk, so it is pinned on both sides.
+   */
+  it('pays the multiplier only to a player who leaves the gap', () => {
+    expect(playRun(20261018, FRAME_PERFECT, 120).peakMultiplier).toBe(1)
+    const collecting = SEEDS.map((seed) => playRun(seed, COMPETENT_COLLECTOR, 120))
+    expect(Math.max(...collecting.map((r) => r.peakMultiplier))).toBe(5)
   })
 })
 
@@ -95,52 +135,121 @@ describe('the ceiling', () => {
 
 describe('the risk/reward layer', () => {
   /**
-   * The headline finding of feel tuning (GOK-5), pinned as tests so that the day
-   * someone changes the mechanic, these fail and tell them it is fixed.
+   * The spec revision of 2026-10-18 (GOK-5), pinned as tests so that the day
+   * someone moves a thermal back inside its gap, these fail and say why.
    *
-   * Two separate claims, weak and strong:
+   * The old placement's problem was not a bad number, it was an algebraic
+   * identity: a ring strictly inside the gap is always collectible from an
+   * altitude that already clears the columns, for every gap height and every
+   * radius, so no retune could have produced a risk layer. The revision inverts
+   * exactly that identity.
    */
 
   /**
-   * Weak form. A thermal that must sit strictly inside the gap can always be
-   * collected from an altitude that was already safe — for every gap height and
-   * every radius, so no retune of the existing constants reaches it.
+   * The threshold the whole mechanic turns on, swept on BOTH sides rather than
+   * confirmed at today's constants. A sweep that only checked the current values
+   * would pass just as happily if the inequality were an accident.
    */
-  it('has no risk in the strong sense: a safe collecting altitude always exists', () => {
-    const { tested, risky } = searchForRiskyPlacement()
+  it('turns on one inequality: the ring is outside the gap, or there is no risk', () => {
+    const { tested, riskyInside, freeOutside } = searchForFreeCollect()
     expect(tested).toBeGreaterThan(100_000)
-    expect(risky).toBe(0)
+    // Inside the gap: a safe collecting altitude ALWAYS exists. The old finding.
+    expect(riskyInside).toBe(0)
+    // Outside it: one never does. The new one.
+    expect(freeOutside).toBe(0)
+    expect(THERMAL_OUTSIDE_OFFSET).toBeGreaterThan(THERMAL_RADIUS)
   })
 
   /**
-   * Strong form, and the one that actually sinks the layer. It is not merely
-   * that *some* safe altitude collects — it is that past a point on the ramp the
-   * single safest altitude in the gap, its exact centre, collects the ring
-   * outright. From there on the reward is not a decision, it is a rebate.
-   *
-   * The crossover is where the collect reach (THERMAL_RADIUS + KITE_RADIUS)
-   * overtakes the ring's offset from the centre (gapHeight/2 - THERMAL_EDGE_INSET).
+   * And the cost does not melt away as the game gets harder, which is what sank
+   * the old placement: there, the ring's offset from the gap centre shrank with
+   * the gap until the centre line collected it outright at t=77s. Here the gap
+   * height cancels, so the excursion is the same constant at t=0 and at maximum
+   * difficulty.
    */
-  it('and none at all once the gap tightens: the centre line collects the ring for free', () => {
+  it('costs the same excursion at every point on the ramp', () => {
+    const expected = THERMAL_OUTSIDE_OFFSET - THERMAL_RADIUS
+    expect(expected).toBeGreaterThan(0)
+    for (const elapsed of [0, 30, 60, DIFFICULTY_RAMP_SECONDS, 3 * DIFFICULTY_RAMP_SECONDS]) {
+      const course = sampleCourse(20261018, elapsed + 30).filter((g) => g.elapsed >= elapsed)
+      expect(course.length).toBeGreaterThan(5)
+      for (const gate of course) {
+        expect(gate.excursion).toBeCloseTo(expected, 9)
+        expect(gate.freeCollect).toBe(0)
+      }
+    }
+  })
+
+  /**
+   * The ring has to be in genuine open air, or the excursion would be instant
+   * death rather than a risk: at no moment may the kite be inside a column's
+   * x-range while an uncollected ring is within reach of it. That is what bounds
+   * THERMAL_LEAD_X on both sides, and the bound depends on the gate spacing the
+   * difficulty ramp produces, so it is checked against the real simulation rather
+   * than against the arithmetic in spawner.ts's header.
+   */
+  it('never puts a ring where reaching for it means being inside a column', () => {
     const reach = THERMAL_RADIUS + KITE_RADIUS
-    const costAt = (elapsed: number): number =>
-      Math.max(0, gapHeight(elapsed) / 2 - THERMAL_EDGE_INSET - reach)
-
-    // Early in a run there is at least some cost...
-    expect(costAt(0)).toBeGreaterThan(0)
-    // ...and by maximum difficulty there is none.
-    expect(costAt(DIFFICULTY_RAMP_SECONDS)).toBe(0)
+    let tightest = Infinity
+    let framesWithARingInReach = 0
+    for (const seed of SEEDS) {
+      // Watched from inside a real run rather than flown by a throwaway input
+      // pattern: the gate schedule is what is being checked, and a pattern crude
+      // enough to write inline here dies in the first few seconds and never sees
+      // the course the player actually meets.
+      playRun(seed, COMPETENT_COLLECTOR, 150, (state) => {
+        if (state.phase !== 'playing') return
+        // Horizontal distance from the kite at which a ring is reachable at all.
+        if (!state.gates.some((gate) => Math.abs(thermalX(gate) - KITE_X) <= reach)) return
+        framesWithARingInReach += 1
+        for (const gate of state.gates) {
+          const clearance = Math.max(
+            gate.x - (KITE_X + KITE_RADIUS),
+            KITE_X - KITE_RADIUS - (gate.x + GATE_WIDTH),
+          )
+          tightest = Math.min(tightest, clearance)
+        }
+      })
+    }
+    // Not vacuous: rings really do come within reach, on hundreds of frames.
+    expect(framesWithARingInReach).toBeGreaterThan(500)
+    // Positive: whenever a ring is in reach, every column is clear of the kite.
+    expect(tightest).toBeGreaterThan(0)
+    // And not vacuous — the margin is real but not enormous.
+    expect(tightest).toBeLessThan(KITE_RADIUS * 4)
   })
 
   /**
-   * And the cost that does exist early is small relative to the margin on offer,
-   * which is why no profile in the feel report ever meaningfully declines a ring.
+   * Finally, the thing the whole revision was for: the layer is not a formality.
+   * A model player that takes every ring dies measurably more often than one that
+   * never leaves the gap — on deaths per 100 gates, which the run cutoff cannot
+   * eat. Under the old placement both of these were 0.
    */
-  it('and what cost exists early is a minority of the available margin', () => {
-    const course = [1, 2, 3, 4, 5].flatMap((seed) => sampleCourse(seed, 180))
-    expect(course.length).toBeGreaterThan(100)
-    const worst = Math.max(...course.map((g) => g.marginCost / g.clearanceOnCentre))
-    expect(worst).toBeLessThan(0.5)
+  it('makes taking rings cost something a safe line does not pay', () => {
+    const rate = (profile: PlayerProfile): number => {
+      const runs = SEEDS.map((seed) => playRun(seed, profile, 120))
+      const gates = runs.reduce((a, r) => a + r.gatesPassed, 0)
+      const deaths = runs.filter((r) => r.crashCause !== null).length
+      return gates === 0 ? Infinity : (100 * deaths) / gates
+    }
+    const safe = rate(COMPETENT)
+    const collector = rate(COMPETENT_COLLECTOR)
+    expect(safe).toBe(0)
+    expect(collector).toBeGreaterThan(1)
+
+    // And it is not merely a tax on shaky hands: taking *every* ring costs a
+    // frame-perfect player runs too, while the same player flying the safe line
+    // never dies at all. That gap is the layer, and it is what the old placement
+    // could not produce at any setting of any constant.
+    expect(rate(FRAME_PERFECT)).toBe(0)
+    expect(rate({ ...FRAME_PERFECT, strategy: 'collector' })).toBeGreaterThan(1)
+
+    // And the safe line is genuinely abstaining now, rather than collecting most
+    // of them by accident the way it did when the ring sat inside the gap.
+    const safeRuns = SEEDS.map((seed) => playRun(seed, COMPETENT, 120))
+    const gates = safeRuns.reduce((a, r) => a + r.gatesPassed, 0)
+    const taken = safeRuns.reduce((a, r) => a + r.thermalsTakenOnPassedGates, 0)
+    expect(taken / gates).toBeLessThan(0.1)
   })
 })
 
@@ -213,38 +322,56 @@ describe('the instrument is not measuring itself', () => {
   })
 
   /**
-   * The `opportunist` was reported as evidence that a cautious player still takes
-   * most rings. It could not have done otherwise: the clearance left by the
-   * cheapest collecting line is a constant, so the profile is a step function of
-   * its own tolerance. Both sides of the step are pinned — below the knee it is
-   * the collector, above it the safe line — so the day someone quotes an
-   * opportunist number again, this says what it is worth.
+   * The `opportunist` used to be a step function of its own tolerance: the
+   * clearance it tested was a constant, so every tolerance below it took every
+   * ring and every tolerance above it took none, and quoting a number from inside
+   * one band as caution was quoting an identity (GOK-14).
+   *
+   * It is a judgement now, and this is what that means operationally: raising the
+   * nerve has to change which rings are declined, not merely how many, and there
+   * has to be a tolerance at which the same player accepts some and declines
+   * others on the same run. A step function cannot do the second one.
    */
-  it('has no tolerance at which declining a ring is a judgement call', () => {
-    const knee = opportunistKnee()
-    expect(knee.floor).toBeLessThan(knee.ceiling)
+  it('declines some rings and takes others at the same tolerance', () => {
+    const base: PlayerProfile = { ...COMPETENT, strategy: 'opportunist', riskTolerance: 40 }
+    const runs = SEEDS.map((seed) => playRun(seed, base, 120))
+    const offered = runs.reduce((a, r) => a + r.ringsOffered, 0)
+    const declined = runs.reduce((a, r) => a + r.ringsDeclined, 0)
+    expect(offered).toBeGreaterThan(100)
+    expect(declined).toBeGreaterThan(0)
+    expect(declined).toBeLessThan(offered)
 
-    const base: PlayerProfile = {
-      strategy: 'opportunist',
-      latency: 0,
-      deadZone: 0,
-      unanticipatedFrames: 0,
-      aimJitter: 0,
-      perception: 0,
-      riskTolerance: knee.floor,
+    // And the knob is a dial rather than a switch: more nerve, fewer rings.
+    const rate = (riskTolerance: number): number => {
+      const rs = SEEDS.map((seed) => playRun(seed, { ...base, riskTolerance }, 120))
+      const o = rs.reduce((a, r) => a + r.ringsOffered, 0)
+      return rs.reduce((a, r) => a + r.ringsDeclined, 0) / o
     }
-    // At the floor it is not merely similar to the collector, it IS the
-    // collector — same run, gate for gate. Above the ceiling it is the safe line.
-    const atFloor = playRun(20261018, base, 120)
-    expect(atFloor.gatesPassed).toBeGreaterThan(50)
-    expect(atFloor).toEqual(playRun(20261018, { ...base, strategy: 'collector' }, 120))
+    expect(rate(0)).toBeLessThan(rate(40))
+    expect(rate(40)).toBeLessThan(rate(90))
+  })
 
-    const aboveCeiling = playRun(20261018, { ...base, riskTolerance: knee.ceiling + 1 }, 120)
-    expect(aboveCeiling).toEqual(playRun(20261018, { ...base, strategy: 'safe' }, 120))
+  /**
+   * The dip depth is a fixed number per strategy (geometry.ts's DIP_DEPTHS), not
+   * something derived from the slack model that then judges it — if it were, "the
+   * collector survives" would be partly a measurement of my own arithmetic. Pinned
+   * so the circularity cannot creep back in.
+   */
+  it('flies dip depths that are stated, not computed from the model that grades them', () => {
+    expect(DIP_DEPTHS.greedy).toBe(0)
+    expect(DIP_DEPTHS.skimmer).toBe(THERMAL_RADIUS + KITE_RADIUS)
+    expect(DIP_DEPTHS.collector).toBeGreaterThan(DIP_DEPTHS.greedy)
+    expect(DIP_DEPTHS.collector).toBeLessThan(DIP_DEPTHS.skimmer)
 
-    // And the safe line is not abstaining — it takes most of the rings anyway,
-    // which is the whole finding.
-    expect(aboveCeiling.thermalsMissed).toBeLessThan(aboveCeiling.gatesPassed)
+    // The skim is the one the geometry says should hurt, and it does: it touches
+    // the ring only at dx = 0, so it drops rings the other lines take.
+    const base = COMPETENT_COLLECTOR
+    const ringRate = (strategy: PlayerProfile['strategy']): number => {
+      const rs = SEEDS.map((seed) => playRun(seed, { ...base, strategy }, 120))
+      const gates = rs.reduce((a, r) => a + r.gatesPassed, 0)
+      return rs.reduce((a, r) => a + r.thermalsTakenOnPassedGates, 0) / Math.max(1, gates)
+    }
+    expect(ringRate('skimmer')).toBeLessThan(ringRate('collector') - 0.2)
   })
 })
 
@@ -254,50 +381,27 @@ describe("the browser suite's input tape", () => {
    * game someone played rather than a card reading zero. The browser asserts
    * nothing about it — under load it scores nothing, which is exactly why — so
    * without this test the tape could rot into a dead schedule and the only
-   * symptom would be quietly worse deploy evidence.
+   * symptom would be quietly worse deploy evidence. It did rot, once: the
+   * thermal revision moved the course out from under it (GOK-5).
    *
-   * Re-derive it by searching schedules against `step()` and keeping the best
-   * worst case under a one-sided delay of up to +50 ms per phase — one-sided
-   * because a CDP round trip only ever makes a phase longer, never shorter.
+   * Re-derive with `node scripts/run-tool.mjs tools/feel/tape-search.ts`, which
+   * flies candidates through the same `flyTape` these assertions use, so the
+   * thing the search maximises and the thing this guards cannot drift apart.
    */
-  function fly(delayPerPhaseMs: number, rand: () => number): number {
-    let state = step(
-      createInitialState(E2E_SEED),
-      { holding: false, confirmPressed: true },
-      FIXED_DT,
-    )
-    let edge = 0
-    const edges = SCORING_TAPE.map((duration) => (edge += duration + delayPerPhaseMs * rand()))
-    const total = edges[edges.length - 1] as number
-
-    while (state.phase === 'playing' && state.elapsed * 1000 < total) {
-      const ms = state.elapsed * 1000
-      let i = 0
-      while (i < edges.length && ms >= (edges[i] as number)) i += 1
-      state = step(state, { holding: i % 2 === 0, confirmPressed: false }, FIXED_DT)
-    }
-    return state.score
-  }
-
-  /** Deterministic PRNG, so this test has exactly one outcome. */
-  function mulberry(seed: number): () => number {
-    let a = seed
-    return () => {
-      a |= 0
-      a = (a + 0x6d2b79f5) | 0
-      let t = Math.imul(a ^ (a >>> 15), 1 | a)
-      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296
-    }
-  }
-
   it('scores on the seed the browser suite uses, with perfect timing', () => {
-    expect(fly(0, () => 0)).toBeGreaterThan(0)
+    expect(flyTape(SCORING_TAPE, E2E_SEED, 0, () => 0)).toBeGreaterThan(0)
   })
 
+  /**
+   * And under delay, one-sided: a CDP round trip only ever makes a phase longer,
+   * never shorter. 200 delay patterns rather than the search's 120, so passing
+   * here is slightly harder than the thing the search optimised.
+   */
   it('still scores when every phase overruns by up to 50 ms', () => {
     const worst = Math.min(
-      ...Array.from({ length: 200 }, (_, i) => fly(50, mulberry(i * 7919 + 1))),
+      ...Array.from({ length: 200 }, (_, i) =>
+        flyTape(SCORING_TAPE, E2E_SEED, 50, mulberry(i * 7919 + 1)),
+      ),
     )
     expect(worst).toBeGreaterThan(0)
   })

@@ -4,16 +4,16 @@ import {
   GATE_WIDTH,
   KITE_RADIUS,
   KITE_X,
+  THERMAL_LEAD_X,
   THERMAL_RADIUS,
 } from '../src/game/constants.js'
 import {
   circleIntersectsRect,
   circlesIntersect,
-  gateCentreX,
   hitsGateColumns,
   touchesThermal,
 } from '../src/game/collision.js'
-import type { Gate, Kite } from '../src/game/state.js'
+import { thermalX, type Gate, type Kite } from '../src/game/state.js'
 
 /**
  * Collision (spec §3): table-driven, with exact-touch and one-pixel-clear cases
@@ -150,10 +150,12 @@ describe('hitsGateColumns', () => {
 })
 
 describe('touchesThermal', () => {
-  const g = gate({ x: KITE_X - GATE_WIDTH / 2 }) // thermal centred on the kite's x
+  // The ring rides THERMAL_LEAD_X ahead of its gate, so this is the gate x that
+  // puts its ring exactly on the kite's own vertical.
+  const g = gate({ x: KITE_X + THERMAL_LEAD_X })
 
   it('collects when the circles touch exactly, and not one pixel short', () => {
-    expect(gateCentreX(g)).toBe(KITE_X)
+    expect(thermalX(g)).toBe(KITE_X)
     const reach = KITE_RADIUS + THERMAL_RADIUS
     expect(touchesThermal(kite(g.thermal.y - reach), g)).toBe(true)
     expect(touchesThermal(kite(g.thermal.y - reach - 1), g)).toBe(false)
@@ -162,12 +164,29 @@ describe('touchesThermal', () => {
   })
 
   it('never re-collects an already collected thermal', () => {
-    const collected = gate({ thermal: { ...g.thermal, collected: true } })
+    const collected = gate({ ...g, thermal: { ...g.thermal, collected: true } })
     expect(touchesThermal(kite(collected.thermal.y), collected)).toBe(false)
   })
 
-  it('is out of reach horizontally once the gate has moved on', () => {
-    const away = gate({ x: KITE_X - GATE_WIDTH / 2 - (KITE_RADIUS + THERMAL_RADIUS + 1) })
+  it('is out of reach horizontally once the ring has swept past', () => {
+    const away = gate({ x: g.x - (KITE_RADIUS + THERMAL_RADIUS + 1) })
     expect(touchesThermal(kite(away.thermal.y), away)).toBe(false)
+  })
+
+  /**
+   * The ring is in open air ahead of the columns, so reaching for it is a
+   * two-dimensional problem: the further the kite is from the ring's altitude,
+   * the narrower the window in which the circles overlap at all. Skimming the
+   * very edge of the collect band collects only at dx = 0, which is why
+   * tools/feel's `skimmer` drops two rings in five.
+   */
+  it('narrows the horizontal window as the kite flies further from the ring', () => {
+    const reach = KITE_RADIUS + THERMAL_RADIUS
+    const atEdge = gate({ x: g.x + 1 })
+    expect(touchesThermal(kite(atEdge.thermal.y - reach), atEdge)).toBe(false)
+    expect(touchesThermal(kite(atEdge.thermal.y - reach + 1), atEdge)).toBe(true)
+    // Level with the ring's centre, a whole reach of horizontal slack remains.
+    expect(touchesThermal(kite(g.thermal.y), gate({ x: g.x + reach }))).toBe(true)
+    expect(touchesThermal(kite(g.thermal.y), gate({ x: g.x + reach + 1 }))).toBe(false)
   })
 })

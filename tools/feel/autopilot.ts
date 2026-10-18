@@ -25,31 +25,56 @@ import {
   KITE_X,
   NET_LIFT_ACCEL,
 } from '../../src/game/constants.js'
+import { scrollSpeed } from '../../src/game/difficulty.js'
 import { integrate } from '../../src/game/physics.js'
 import { createRng, nextRange, type Rng } from '../../src/game/rng.js'
-import { gapCentre } from '../../src/game/spawner.js'
+import { gapCentre, reach } from '../../src/game/spawner.js'
 import { step } from '../../src/game/update.js'
-import { createInitialState, type Gate, type GameState, type Kite } from '../../src/game/state.js'
+import {
+  createInitialState,
+  thermalX,
+  type Gate,
+  type GameState,
+  type Kite,
+} from '../../src/game/state.js'
+import { DIP_DEPTHS, roundTrip } from './geometry.js'
 
 /** How the model player chooses what altitude to aim for. */
 export type Strategy =
-  /** Fly gap centres. Never aims at a thermal — though see `collector` on why it may still get some. */
+  /** Fly gap centres. Never leaves the safe line, and so never takes a ring at all. */
   | 'safe'
   /** Aim at the ring's centre, every time. A naive player: maximum commitment, maximum exposure. */
   | 'greedy'
   /**
-   * Take every ring, but on the cheapest line that still touches it — the point
-   * of the collect band nearest the gap centre.
+   * Dip only as far as the very edge of the collect band — the shallowest line
+   * that touches the ring at all.
    *
-   * This is what a competent player actually does, and it is the profile that
+   * Under the old placement this was the *cheapest* line and therefore what a
+   * competent player flew. Under the revised one it is a trap, and keeping it as
+   * a profile is how that gets measured rather than asserted: touching from the
+   * edge of the band only happens at the single instant the ring is level with
+   * the kite, which is the latest possible contact and the least time to recover.
+   */
+  | 'skimmer'
+  /**
+   * Dip to the depth with the most room for error at the current difficulty —
+   * `bestDipDepth` in geometry.ts, somewhere between the two extremes above.
+   *
+   * This is what a competent player converges on, and it is the profile that
    * isolates the true price of a thermal: `collector` minus `safe` is the cost
    * of the reward, with strategy held constant everywhere else.
    */
   | 'collector'
   /**
-   * Take a ring only when the cheapest collecting line still leaves at least
-   * `riskTolerance` px of clearance. Declines the ones that cost more than the
-   * player's own error budget.
+   * Fly the collector's line, but only commit to a ring when the round trip —
+   * get to the dip, touch it, climb back — has at least `riskTolerance` px of
+   * spare reach at both ends. Otherwise stay on the gap centre and give up the
+   * streak.
+   *
+   * Unlike the old opportunist this is a genuine per-gate judgement: the climb
+   * out is fixed by the ramp, but the *approach* depends on where the previous
+   * gap left the kite, so the same tolerance accepts some rings and declines
+   * others on the same run.
    */
   | 'opportunist'
 
@@ -109,19 +134,29 @@ export interface PlayerProfile {
    */
   readonly perception: number
   /**
-   * Clearance (px) to the nearer column that an `opportunist` insists on before
-   * going for a ring. Ignored by the other strategies.
+   * Spare reach (px) an `opportunist` insists on, at both ends of the round trip,
+   * before committing to a ring. Ignored by the other strategies.
    *
-   * This is a step function, not a dial, and the step is the finding rather than
-   * a defect: see `opportunistKnee` in geometry.ts. The clearance of the cheapest
-   * collecting line is `min(h/2, THERMAL_EDGE_INSET + THERMAL_RADIUS) -
-   * KITE_RADIUS`, which is 67px for most of the ramp and 59px at its hardest, so
-   * every tolerance below 59 takes every ring and every tolerance above 67
-   * declines every ring. Reporting a tolerance from the first band as if it
-   * measured caution is reporting an identity — the GOK-14 review was right about
-   * that, and report.ts now prints the knee instead.
+   * The GOK-14 review was right that the old version of this knob was a step
+   * function of its own definition: the clearance it tested was a constant, so
+   * every tolerance below it took every ring and every tolerance above it took
+   * none, and quoting a number from inside the first band as caution was quoting
+   * an identity. The test is seed-dependent now — the climb out is fixed by the
+   * ramp, but the approach depends on where the previous gap left the kite — so
+   * the same tolerance can accept one ring and decline the next. report.ts prints
+   * the accept rate, which is only a meaningful number because of that.
    */
   readonly riskTolerance: number
+  /**
+   * Override for `safetyMargin` — how close to a column this player will lean
+   * when positioning for the next ring. Omit to derive it from the noise terms.
+   *
+   * It exists so report.ts can sweep it. The margin is the instrument's own
+   * caution, it is subtracted from the approach to every ring, and a design whose
+   * feasibility rested on it would be a design measured by my own timidity rather
+   * than by the game.
+   */
+  readonly leanMargin?: number
 }
 
 export interface RunResult {
@@ -143,6 +178,15 @@ export interface RunResult {
   /** Rings taken on gates that are fully behind the kite. The honest denominator pair. */
   readonly thermalsTakenOnPassedGates: number
   readonly peakMultiplier: number
+  /** Gates an `opportunist` reached a decision about. 0 for every other strategy. */
+  readonly ringsOffered: number
+  /**
+   * Of those, the ones it decided against. The pair is the only honest way to
+   * report caution: a count of declines alone says nothing without its
+   * denominator, and the old `opportunist` had no denominator at all because it
+   * could never decline anything.
+   */
+  readonly ringsDeclined: number
   readonly crashCause: 'ground' | 'column' | null
   /**
    * True if the run hit `maxSeconds` instead of ending.
@@ -161,50 +205,164 @@ function targetGate(state: GameState): Gate | undefined {
   return state.gates.find((gate) => gate.x + GATE_WIDTH >= KITE_X - KITE_RADIUS)
 }
 
+/** px of scroll before this gate's trailing edge is clear of the kite. */
+function scrollUntilClear(gate: Gate): number {
+  return gate.x + GATE_WIDTH - (KITE_X - KITE_RADIUS)
+}
+
+/** px of scroll before this gate's ring first comes within reach, dipping `depth` short. */
+function scrollUntilContact(gate: Gate, depth: number): number {
+  const reachPx = gate.thermal.radius + KITE_RADIUS
+  const closing = Math.sqrt(Math.max(0, reachPx * reachPx - depth * depth))
+  return thermalX(gate) - KITE_X - closing
+}
+
+/** The altitudes of a gate's safe band — every y in it clears both columns. */
+function safeBand(gate: Gate): { low: number; high: number } {
+  return { low: gate.gapY + KITE_RADIUS, high: gate.gapY + gate.gapHeight - KITE_RADIUS }
+}
+
+/** Is this gate's ring still worth aiming at — uncollected, and not yet swept past? */
+function ringIsLive(gate: Gate): boolean {
+  return !gate.thermal.collected && thermalX(gate) >= KITE_X - (gate.thermal.radius + KITE_RADIUS)
+}
+
+/**
+ * The altitude a ring-seeking strategy dips to on this gate: `depth` px short of
+ * the ring's centre, on the gap's side of it.
+ */
+function dipLine(gate: Gate, depth: number): number {
+  const towardGap = gate.thermal.y > gapCentre(gate) ? -1 : 1
+  return gate.thermal.y + towardGap * depth
+}
+
+/** The altitude a ring-seeking strategy wants on this gate, ignoring everything else. */
+function ringLine(gate: Gate, profile: PlayerProfile): number {
+  switch (profile.strategy) {
+    case 'greedy':
+      return dipLine(gate, DIP_DEPTHS.greedy)
+    case 'skimmer':
+      return dipLine(gate, DIP_DEPTHS.skimmer)
+    default:
+      return dipLine(gate, DIP_DEPTHS.collector)
+  }
+}
+
 /**
  * Altitude the player is aiming for.
  *
- * `collector` is the interesting one: it takes every ring on the *cheapest* line
- * that touches it rather than aiming at the ring's centre, which is what a
- * competent player does and what makes `collector` minus `safe` a clean read on
- * what a thermal actually costs.
+ * Two phases, and the second one is where the first pass of this rewrite went
+ * wrong badly enough to be worth recording. The obvious controller — aim at the
+ * ring ahead of you, then at the gap once you have it — kills every collecting
+ * profile inside ten seconds, because by the time a gate is behind the kite the
+ * *next* gate's ring is already about 70 px away. There is not enough open air
+ * between two gates to start the excursion from a standing start at the gap
+ * centre, at any difficulty.
  *
- * `opportunist` then declines the rings whose cheapest line is still tighter
- * than their nerve. If the opportunist ends up collecting nearly all of them,
- * the "risk" in the risk/reward layer is not real.
+ * What a player actually does, and what this does now, is sit on the side of the
+ * gap they are flying through that the next ring is on. The gap's safe band is
+ * roughly 120 px tall, so leaning on it is most of the approach, taken during the
+ * traverse where it is free. The band is inset by the player's own error budget
+ * first (`safetyMargin`), because leaning on an edge you cannot hold is not a
+ * plan.
+ *
+ * That it took a rewrite to find this is itself a finding about the mechanic: the
+ * skill it asks for is *positioning a gate early*, not reacting when the ring
+ * arrives. See the feel notes on GOK-5.
  */
-function aimFor(state: GameState, profile: PlayerProfile): number {
+function aimFor(state: GameState, profile: PlayerProfile, decide: (gate: Gate) => boolean): number {
   const gate = targetGate(state)
   if (gate === undefined) return KITE_START_Y
 
   const centre = gapCentre(gate)
+  // `safe` is the baseline every other profile is measured against, so it stays
+  // exactly what it says: gap centres, never anything else.
   if (profile.strategy === 'safe') return centre
 
-  // Note the absence of a `gate.thermal.collected` test. An earlier version
-  // retargeted to the gap centre the instant the ring was taken, which put a
-  // step change into the target *while the kite was between the columns* and
-  // killed the thermal-chasing profiles within 33 ms of latency. That was the
-  // controller, not the game. No player flinches toward the centre of a gap they
-  // are already inside, and they do not need to: the ring always sits inside the
-  // safe band, so its altitude is a legal line through the gate. Commit to the
-  // altitude and hold it until the gate is behind you.
-  if (profile.strategy === 'greedy') return gate.thermal.y
+  // Phase 1: the ring ahead of the gate is still live, and we are in the open air
+  // in front of the columns. Fly it.
+  if (ringIsLive(gate) && decide(gate)) {
+    return ringLine(gate, profile)
+  }
 
-  // The cheapest collecting line: clearance to the nearer column is maximised at
-  // the gap centre and falls off linearly either way, so the best altitude that
-  // still touches the ring is the point of the collect band nearest the centre.
-  const safeLow = gate.gapY + KITE_RADIUS
-  const safeHigh = gate.gapY + gate.gapHeight - KITE_RADIUS
-  if (safeLow > safeHigh) return centre
-  const reach = gate.thermal.radius + KITE_RADIUS
-  const nearest = Math.min(Math.max(centre, gate.thermal.y - reach), gate.thermal.y + reach)
-  const cheapest = Math.min(Math.max(nearest, safeLow), safeHigh)
+  // Phase 2: through the gap, with the next ring already in mind. Lean toward it,
+  // but only as far as this gap's safe band minus the player's own error budget —
+  // leaning on an edge you cannot hold is not a plan, and the lean is the one
+  // thing in this file that trades the current gate's safety for the next ring.
+  const next = state.gates.find((g) => g.id === gate.id + 1)
+  if (next === undefined || !ringIsLive(next) || !decide(next)) return centre
 
-  if (profile.strategy === 'collector') return cheapest
+  return leanToward(ringLine(next, profile), gate, safetyMargin(profile))
+}
 
-  // opportunist: only if that line still leaves them room for their own error.
-  const clearance = Math.min(cheapest - safeLow, safeHigh - cheapest)
-  return clearance >= profile.riskTolerance ? cheapest : centre
+/**
+ * How close to a column this player will fly when leaning toward the next ring.
+ *
+ * Quadrature, not a sum: the dead zone, the per-gate aim error and the per-frame
+ * read error are independent, so adding their worst cases would model a player
+ * who is maximally wrong in three ways at once and would overstate the margin by
+ * about 1.7x. The 4px floor is because the band's edge *is* the column — a
+ * bang-bang controller oscillates around its target, and a frame-perfect player
+ * who leans on the literal edge dies on the oscillation.
+ *
+ * This number matters: it is subtracted from the lean, and the lean is most of
+ * the approach to a ring. `leanMargin` overrides it, and report.ts sweeps that
+ * override, because a design whose feasibility rests on the instrument's own
+ * caution is not a design that has been measured.
+ */
+export function safetyMargin(profile: PlayerProfile): number {
+  if (profile.leanMargin !== undefined) return profile.leanMargin
+  const { deadZone: z, aimJitter: j, perception: p } = profile
+  return 4 + Math.sqrt(z * z + j * j + p * p)
+}
+
+/**
+ * The altitude in `gate`'s gap closest to `toward`, keeping `inset` px away from
+ * both columns. Falls back to the gap centre when the band is narrower than the
+ * margin asks for — leaning is never worth more than getting through.
+ */
+function leanToward(toward: number, gate: Gate, inset: number): number {
+  const band = safeBand(gate)
+  const low = band.low + inset
+  const high = band.high - inset
+  if (low > high) return gapCentre(gate)
+  return Math.min(Math.max(toward, low), high)
+}
+
+/**
+ * Does an `opportunist` go for this gate's ring?
+ *
+ * Both legs have to clear `riskTolerance`. The climb out of the dip is fixed by
+ * the ramp (`recoveryWindow`). The approach is the seed-dependent half, and the
+ * reason this is a judgement rather than an identity: it runs from the best
+ * position the *previous* gap allows — its safe band clamped toward the ring — to
+ * the dip line, over the open air between the two gates. When the two gaps are
+ * offset the wrong way the band cannot lean far enough and the ring is declined.
+ *
+ * `reach` is the spawner's own settle-and-arrive distance, so the model player is
+ * exactly as capable as the fairness rule assumes and no more.
+ */
+function willCommit(state: GameState, gate: Gate, profile: PlayerProfile): boolean {
+  if (profile.strategy !== 'opportunist') return true
+  if (!ringIsLive(gate)) return false
+
+  const trip = roundTrip(state.elapsed, DIP_DEPTHS.collector)
+  if (trip.recovery.capable - trip.travel < profile.riskTolerance) return false
+
+  const line = dipLine(gate, DIP_DEPTHS.collector)
+  const front = targetGate(state)
+  const from =
+    front === undefined || front.id === gate.id
+      ? state.kite.y
+      : leanToward(line, front, safetyMargin(profile))
+  const approach =
+    scrollUntilContact(gate, DIP_DEPTHS.collector) -
+    (front === undefined || front.id === gate.id ? 0 : scrollUntilClear(front))
+  if (approach <= 0) return false
+
+  return (
+    reach(approach / scrollSpeed(state.elapsed)) >= Math.abs(line - from) + profile.riskTolerance
+  )
 }
 
 /**
@@ -251,8 +409,20 @@ export function latencyFrames(latency: number): number {
   return Math.max(0, Math.round(latency / FIXED_DT))
 }
 
-/** Play one run to its crash (or to `maxSeconds`) and report what happened. */
-export function playRun(seed: number, profile: PlayerProfile, maxSeconds = 300): RunResult {
+/**
+ * Play one run to its crash (or to `maxSeconds`) and report what happened.
+ *
+ * `observe` is called with the state after every step and must not touch it: it
+ * exists so a test can watch a real run frame by frame — what the course looked
+ * like while somebody was actually flying it — without a second controller
+ * having to be written and then trusted.
+ */
+export function playRun(
+  seed: number,
+  profile: PlayerProfile,
+  maxSeconds = 300,
+  observe?: (state: GameState) => void,
+): RunResult {
   let state = step(createInitialState(seed), { holding: false, confirmPressed: true }, FIXED_DT)
 
   const latencySteps = latencyFrames(profile.latency)
@@ -263,6 +433,33 @@ export function playRun(seed: number, profile: PlayerProfile, maxSeconds = 300):
   let noiseRng: Rng = createRng(seed ^ 0x5f3759df)
   let jitterGateId = -1
   let jitter = 0
+  let ringsOffered = 0
+  let ringsDeclined = 0
+
+  /**
+   * Whether to go for each gate's ring, decided once and then lived with — a
+   * player commits or does not, they do not re-litigate it every frame.
+   *
+   * The decision is taken the first time the gate is looked at, which is while
+   * the kite is still flying the gate *before* it, and therefore before any
+   * leaning toward this ring has happened. Deciding later would let the
+   * pre-positioning talk the opportunist into rings it would not otherwise have
+   * taken, and the profile would collapse back toward the identity the GOK-14
+   * review found in its predecessor.
+   */
+  const decisions = new Map<number, boolean>()
+  function decide(gate: Gate): boolean {
+    const known = decisions.get(gate.id)
+    if (known !== undefined) return known
+    const verdict = willCommit(state, gate, profile)
+    decisions.set(gate.id, verdict)
+    for (const id of decisions.keys()) if (id < gate.id - 3) decisions.delete(id)
+    if (profile.strategy === 'opportunist') {
+      ringsOffered += 1
+      if (!verdict) ringsDeclined += 1
+    }
+    return verdict
+  }
 
   function draw(spread: number): number {
     if (spread === 0) return 0
@@ -285,7 +482,7 @@ export function playRun(seed: number, profile: PlayerProfile, maxSeconds = 300):
       jitter = draw(profile.aimJitter)
     }
 
-    const target = aimFor(state, profile) + jitter
+    const target = aimFor(state, profile, decide) + jitter
     const led = lookAhead(state.kite, pending, profile.unanticipatedFrames)
     // The player reads their own altitude imperfectly; velocity is left clean,
     // since differentiating noise would model a sensor rather than a person.
@@ -302,11 +499,29 @@ export function playRun(seed: number, profile: PlayerProfile, maxSeconds = 300):
     pending.push(decision)
     const holding = pending.shift() as boolean
 
+    if (process.env['TRACE'] === '1') {
+      const g = targetGate(state)
+      console.log(
+        [
+          state.elapsed.toFixed(3),
+          'y',
+          state.kite.y.toFixed(1),
+          'vy',
+          state.kite.vy.toFixed(0),
+          'aim',
+          target.toFixed(1),
+          g
+            ? `gate${g.id} x=${g.x.toFixed(0)} gap=[${g.gapY.toFixed(0)},${(g.gapY + g.gapHeight).toFixed(0)}] ringX=${thermalX(g).toFixed(0)} ringY=${g.thermal.y.toFixed(0)} got=${String(g.thermal.collected)}`
+            : 'no gate',
+        ].join(' '),
+      )
+    }
     state = step(state, { holding, confirmPressed: false }, FIXED_DT)
+    observe?.(state)
 
     for (const event of state.events) {
-      // thermal_collected always precedes its gate_passed — contact happens
-      // inside the gate, the pass is scored on its trailing edge — so the set is
+      // thermal_collected always precedes its gate_passed — the ring rides ahead
+      // of the gate and the pass is scored on its trailing edge — so the set is
       // always populated by the time the gate is counted.
       if (event.type === 'thermal_collected') {
         thermalsCollected += 1
@@ -332,6 +547,8 @@ export function playRun(seed: number, profile: PlayerProfile, maxSeconds = 300):
     thermalsMissed,
     thermalsTakenOnPassedGates,
     peakMultiplier,
+    ringsOffered,
+    ringsDeclined,
     crashCause: state.crashCause,
     censored: state.crashCause === null,
   }

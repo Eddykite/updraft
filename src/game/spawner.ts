@@ -12,24 +12,91 @@
  * `maxCentreDelta`. The 0.5 headroom is deliberate: a course that is only just
  * flyable is not fun. A property test over 10,000 seeds asserts this invariant,
  * plus that every gap sits inside field bounds and every thermal sits strictly
- * inside its gap (spec §3) — that test is what protects us against "unwinnable
- * run" bug reports.
+ * *outside* its gap (spec §3, revised) — that test is what protects us against
+ * "unwinnable run" bug reports.
  *
  * `T` is taken as `spawnInterval(elapsed)` — the interval at the moment the
  * *later* gate is created. Because the interval only ever shrinks, that is the
  * conservative choice: the player always has at least that long between the two
  * gaps arriving.
+ *
+ * Note what the fairness rule is about and what it is not. It is about the
+ * *gaps*: a course must be flyable by a player who ignores every ring. Rings are
+ * optional by construction, so a ring the player cannot safely reach is a ring
+ * they decline, not an unwinnable run. That separation is what lets the reward
+ * layer carry real risk without the course ever becoming unfair.
+ *
+ * ## Where a ring goes, and why it costs something
+ *
+ * A ring rides THERMAL_LEAD_X px *ahead* of its gate, in the open air, at an
+ * altitude THERMAL_OUTSIDE_OFFSET px beyond one edge of the gap — an altitude the
+ * column will be occupying by the time the gate arrives. So the player meets the
+ * ring first, leaves the line for it, and has THERMAL_LEAD_X px of travel to get
+ * back before the columns.
+ *
+ * The cost is exact and difficulty-independent. Writing Rk for KITE_RADIUS, Rt for
+ * THERMAL_RADIUS, Q for THERMAL_OUTSIDE_OFFSET and h for the gap height:
+ *
+ *   safe band      |y - centre| <= h/2 - Rk
+ *   collects       |y - thermal.y| <= Rt + Rk,  thermal.y = centre ± (h/2 + Q)
+ *   nearest line   |y - centre| = h/2 + Q - (Rt + Rk)
+ *
+ * so the nearest collecting altitude sits outside the safe band by exactly
+ * `Q - Rt` px, for every gap height, at every point on the difficulty ramp. The
+ * `h/2` cancels. That is the dual of the old placement's problem: when the ring
+ * was strictly *inside* the gap the same algebra guaranteed a safe collecting
+ * altitude always existed, which is why no retune of the old inset could have
+ * produced a risk layer. One inequality decides which regime we are in — Q > Rt —
+ * and tests/playable.test.ts sweeps it in both directions.
+ *
+ * ## Why THERMAL_LEAD_X is bounded on both sides
+ *
+ * The ring must sit in genuine open air: a player reaching for it must not be
+ * inside *any* column's x-range while they do it, or the excursion would be
+ * instant death rather than a risk. The kite is a circle of Rk at KITE_X and can
+ * touch the ring from `Rt + Rk` away, so with L = THERMAL_LEAD_X and S the
+ * distance between consecutive gates' leading edges:
+ *
+ *   own gate       L > (Rt + Rk) + 2·Rk           = 54 px
+ *   previous gate  L < S - GATE_WIDTH - (Rt + Rk) - 2·Rk
+ *
+ * S is the distance scrolled in one spawn interval, `speed(p)·interval(p)` =
+ * 288 + 258p - 168p², minimised at p = 0, less at most one frame of spawn jitter:
+ * 288 - 420/60 = 281 px. So L < 157, and L = 110 leaves 47 px of headroom there.
+ *
+ * Within that window L splits a fixed budget — the open air between two gates is
+ * `S - GATE_WIDTH - 2·Rk` px however L is chosen — between going out to the ring
+ * and getting back. 110 favours the way back slightly, which is the leg with no
+ * second chances: miss the approach and you lose a ring, miss the recovery and
+ * you lose the run.
+ *
+ * ## Which side the ring hangs off
+ *
+ * The side the kite is *coming from* — the edge facing the previous gap's centre.
+ * This was measured rather than assumed, and it is the difference between a
+ * mechanic and a punishment. Hanging the ring off the far edge instead makes the
+ * trip cost the gap-to-gap move plus the excursion, in the shorter of the two
+ * legs: a model player that took every one of those rings died 82 times per 100
+ * gates, against 7 for the near edge. Rings nobody can take are not a decision,
+ * they are bait, and the whole point of the revision was to stop shipping a
+ * thermal that is never a decision.
+ *
+ * On the near edge every ring is attemptable and the risk is where it should be:
+ * in the overshoot and the climb out. The RNG still picks when two consecutive
+ * gaps are exactly level, which is the one case with no side to come from.
  */
 
 import {
-  FIELD_WIDTH,
+  CEILING_Y,
   GAP_Y_MAX_EDGE,
   GAP_Y_MIN,
+  GATE_SPAWN_X,
+  GROUND_Y,
   MAX_CENTRE_DELTA_MAX,
   MAX_CENTRE_DELTA_MIN,
   NET_LIFT_ACCEL,
   REACH_HEADROOM,
-  THERMAL_EDGE_INSET,
+  THERMAL_OUTSIDE_OFFSET,
   THERMAL_RADIUS,
   VY_CLAMP,
 } from './constants.js'
@@ -69,6 +136,44 @@ export function maxCentre(height: number): number {
   return GAP_Y_MAX_EDGE - height / 2
 }
 
+/** Lowest ring centre that keeps the whole ring in open air below the ceiling. */
+export const THERMAL_Y_MIN = CEILING_Y + THERMAL_RADIUS
+/** Highest ring centre that keeps the whole ring in open air above the ground. */
+export const THERMAL_Y_MAX = GROUND_Y - THERMAL_RADIUS
+
+/**
+ * Which side of the gap the ring hangs off: the one the kite is coming from.
+ * The RNG only breaks the tie when the two gaps are exactly level.
+ */
+export function approachesFromBelow(
+  previousCentre: number | null,
+  centre: number,
+  fallback: boolean,
+): boolean {
+  if (previousCentre === null || previousCentre === centre) return fallback
+  return previousCentre > centre
+}
+
+/**
+ * The ring's altitude: `THERMAL_OUTSIDE_OFFSET` px beyond one edge of the gap,
+ * on the side the kite is coming from — unless that side would put it outside
+ * the field, in which case it goes on the other side.
+ *
+ * The flip is never ambiguous, because both sides can only fail at once when
+ *
+ *   centre - h/2 - Q < THERMAL_Y_MIN  and  centre + h/2 + Q > THERMAL_Y_MAX
+ *
+ * which needs `THERMAL_Y_MAX - THERMAL_Y_MIN < h + 2Q`, i.e. 856 < h + 120. The
+ * widest gap the ramp ever produces is 260. The sweep in tests/spawner.test.ts
+ * checks every (h, centre) the game can reach rather than taking my word for it.
+ */
+export function thermalY(centre: number, height: number, below: boolean): number {
+  const offset = height / 2 + THERMAL_OUTSIDE_OFFSET
+  const preferred = below ? centre + offset : centre - offset
+  const inField = preferred >= THERMAL_Y_MIN && preferred <= THERMAL_Y_MAX
+  return inField ? preferred : centre + (below ? -offset : offset)
+}
+
 /**
  * Generate the next gate.
  *
@@ -105,20 +210,15 @@ export function spawnGate(
   const [afterCentre, centre] = nextRange(rng, low, high)
   const [afterSide, below] = nextBool(afterCentre)
 
-  // The thermal hugs one edge of the gap but stays clear of it: the inset (45)
-  // is larger than the thermal radius (22), so the ring is always strictly
-  // inside the gap however tight the gap gets.
-  const offset = height / 2 - THERMAL_EDGE_INSET
-
   return [
     afterSide,
     {
       id,
-      x: FIELD_WIDTH,
+      x: GATE_SPAWN_X,
       gapY: centre - height / 2,
       gapHeight: height,
       thermal: {
-        y: centre + (below ? offset : -offset),
+        y: thermalY(centre, height, approachesFromBelow(previousCentre, centre, below)),
         radius: THERMAL_RADIUS,
         collected: false,
       },
