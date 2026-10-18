@@ -20,12 +20,12 @@ coverage → build → bundle budget.
 
 ## Controls
 
-| | |
-| --- | --- |
-| Climb | hold Space / ↑ / W / left mouse button, or hold anywhere on the canvas |
-| Start, restart | press any of the above |
-| Pause | Esc, losing focus, or hiding the tab — the press that resumes does not also climb |
-| Mute | M, or the speaker (a 44 × 44 target, top right); persists across reloads |
+|                |                                                                                   |
+| -------------- | --------------------------------------------------------------------------------- |
+| Climb          | hold Space / ↑ / W / left mouse button, or hold anywhere on the canvas            |
+| Start, restart | press any of the above                                                            |
+| Pause          | Esc, losing focus, or hiding the tab — the press that resumes does not also climb |
+| Mute           | M, or the speaker (a 44 × 44 target, top right); persists across reloads          |
 
 `?seed=12345` replays an identical course — the game-over screen prints the seed a run was
 flown with, so a bug report can carry one.
