@@ -57,12 +57,25 @@
  * touch the ring from `Rt + Rk` away, so with L = THERMAL_LEAD_X and S the
  * distance between consecutive gates' leading edges:
  *
- *   own gate       L > (Rt + Rk) + 2·Rk           = 54 px
- *   previous gate  L < S - GATE_WIDTH - (Rt + Rk) - 2·Rk
+ *   own gate       L > (Rt + Rk) + Rk            = 54 px
+ *   previous gate  L < S - GATE_WIDTH - (Rt + Rk) - Rk
+ *
+ * One Rk in each, not two: the ring enters reach at `Rt + Rk` from KITE_X and the
+ * column has to clear the near side of the kite, which is Rk from its centre. The
+ * `2·Rk` below is a different quantity — that one spans both sides of the kite.
  *
  * S is the distance scrolled in one spawn interval, `speed(p)·interval(p)` =
  * 288 + 258p - 168p², minimised at p = 0, less at most one frame of spawn jitter:
  * 288 - 420/60 = 281 px. So L < 157, and L = 110 leaves 47 px of headroom there.
+ *
+ * That headroom is spent by anything that tightens gate spacing, and the ramp is
+ * the thing that would: S is *not* monotonic in p. It peaks at p = 0.77 (387 px)
+ * and is already falling by p = 1 (378 px), so a post-ramp curve that keeps
+ * feeding an unclamped p into the current speed/interval pair shrinks S from both
+ * ends at once. The bound on L = 110 is reached at p = 1.70, and `interval(p)`
+ * hits zero at p = 2.29. Whoever writes that curve owns this coupling: either
+ * keep S above 234 px, or move L down with it. tests/playable.test.ts checks the
+ * real simulation, but only over the ramp as it is clamped today.
  *
  * Within that window L splits a fixed budget — the open air between two gates is
  * `S - GATE_WIDTH - 2·Rk` px however L is chosen — between going out to the ring
