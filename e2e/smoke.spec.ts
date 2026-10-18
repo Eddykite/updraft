@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { best, captureScene, logicalPoint, openGame, phase, watchConsole } from './game.js'
+import { MUTE_BUTTON } from '../src/render/hud.js'
 
 /**
  * The shell against the built bundle (spec §4 step 8).
@@ -51,7 +52,14 @@ test('the mute toggle persists across a reload', async ({ page }) => {
   await expect(page.locator('html')).toHaveAttribute('data-updraft-muted', 'false')
 
   // Tap the middle of the speaker's 44 × 44 hit area, in logical coordinates.
-  const speaker = await logicalPoint(canvas, 540 - 16 - 22, 16 + 22)
+  // Derived from MUTE_BUTTON — the same single source hud.ts draws and input.ts
+  // hit-tests — so the claim that the icon and the tap target cannot drift is
+  // actually what this test checks, rather than a pair of matching literals.
+  const speaker = await logicalPoint(
+    canvas,
+    MUTE_BUTTON.x + MUTE_BUTTON.width / 2,
+    MUTE_BUTTON.y + MUTE_BUTTON.height / 2,
+  )
   await page.mouse.click(speaker.x, speaker.y)
   await expect(page.locator('html')).toHaveAttribute('data-updraft-muted', 'true')
 

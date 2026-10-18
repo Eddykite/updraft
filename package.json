@@ -22,6 +22,8 @@
     "test:coverage": "vitest run --coverage",
     "budget": "node scripts/bundle-budget.mjs",
     "e2e": "playwright test",
+    "feel": "node scripts/run-tool.mjs tools/feel/report.ts",
+    "feel:sweep": "node scripts/run-tool.mjs tools/feel/sensitivity.ts",
     "verify": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test:coverage && pnpm build && pnpm budget"
   },
   "dependencies": {},
@@ -30,6 +32,7 @@
     "@playwright/test": "1.64.1",
     "@types/node": "22.20.5",
     "@vitest/coverage-v8": "5.0.5",
+    "esbuild": "0.28.2",
     "eslint": "10.13.0",
     "eslint-config-prettier": "10.1.8",
     "globals": "17.13.0",

@@ -18,7 +18,7 @@
 
 import { FIELD_HEIGHT, FIELD_WIDTH, MUTE_HIT_AREA } from '../game/constants.js'
 import type { GameState } from '../game/state.js'
-import { PALETTE } from './palette.js'
+import { mixHex, PALETTE } from './palette.js'
 
 /** No font files: the system UI stack, which is already on every device. */
 const FONT = `system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif`
@@ -84,6 +84,18 @@ export function drawHud(ctx: CanvasRenderingContext2D, state: GameState, model: 
 
 // --- live HUD ----------------------------------------------------------------
 
+/**
+ * Centre of the "hold to climb" hint, deliberately NOT the centre of the field.
+ *
+ * The kite flies at a fixed x of KITE_X (150) and roams the full height, so a
+ * centred hint is text the kite falls straight through — which is exactly what
+ * it did on the first screenshot of a real run. Both lines are under 180px wide,
+ * so centring them here keeps them clear of the kite and its tail (which trails
+ * to the *left*, making the right side of the field the safe one) at every
+ * altitude, without moving the hint around as the kite moves.
+ */
+const HINT_X = 350
+
 function drawPlayingHud(ctx: CanvasRenderingContext2D, state: GameState, model: HudModel): void {
   ctx.save()
   // A soft drop shadow is what keeps white text legible over a bright column.
@@ -99,7 +111,10 @@ function drawPlayingHud(ctx: CanvasRenderingContext2D, state: GameState, model: 
   ctx.save()
   ctx.translate(FIELD_WIDTH / 2, 142)
   ctx.scale(1 + pulse * 0.35, 1 + pulse * 0.35)
-  ctx.fillStyle = pulse > 0 ? PALETTE.thermalCore : PALETTE.textAccent
+  // Interpolated, not switched: a `pulse > 0 ?` test makes the colour pop back
+  // in a single frame at the end of each pulse, which contradicts "grows and
+  // brightens, then settles" and is the one bit of the HUD that read as a flash.
+  ctx.fillStyle = mixHex(PALETTE.textAccent, PALETTE.thermalCore, pulse)
   ctx.font = `700 30px ${FONT}`
   ctx.fillText(`×${state.multiplier}`, 0, 0)
   ctx.restore()
@@ -108,10 +123,10 @@ function drawPlayingHud(ctx: CanvasRenderingContext2D, state: GameState, model: 
     ctx.globalAlpha = clamp01(model.hintAlpha)
     ctx.fillStyle = PALETTE.text
     ctx.font = `600 26px ${FONT}`
-    ctx.fillText('hold to climb', FIELD_WIDTH / 2, 620)
+    ctx.fillText('hold to climb', HINT_X, 620)
     ctx.globalAlpha = clamp01(model.hintAlpha) * 0.75
     ctx.font = `400 20px ${FONT}`
-    ctx.fillText('let go to glide', FIELD_WIDTH / 2, 652)
+    ctx.fillText('let go to glide', HINT_X, 652)
   }
   ctx.restore()
 }
@@ -196,8 +211,10 @@ function drawTitleCard(ctx: CanvasRenderingContext2D, model: HudModel): void {
 
   prompt(ctx, 'press anything to fly', 560, model.time)
 
+  // Same reasoning as the seed on the game-over card: the build string is what
+  // a bug report quotes, so it has to clear AA rather than merely decorate.
   ctx.fillStyle = PALETTE.textDim
-  ctx.globalAlpha = 0.6
+  ctx.globalAlpha = 0.9
   ctx.font = `400 16px ${FONT}`
   ctx.fillText(`build ${model.build}`, FIELD_WIDTH / 2, FIELD_HEIGHT - 44)
   ctx.restore()
@@ -249,9 +266,11 @@ function drawGameOverCard(ctx: CanvasRenderingContext2D, state: GameState, model
     ctx.fillText(`best ${model.best}`, FIELD_WIDTH / 2, 492)
   }
 
-  // The seed makes a bug report reproducible (spec §2, determinism).
+  // The seed makes a bug report reproducible (spec §2, determinism) — which
+  // means someone has to be able to *read* it. At alpha 0.55 this was ~3.1:1
+  // against the panel, under the 4.5:1 AA floor for functional text.
   ctx.fillStyle = PALETTE.textDim
-  ctx.globalAlpha = 0.55
+  ctx.globalAlpha = 0.9
   ctx.font = `400 15px ${FONT}`
   ctx.fillText(`seed ${state.seed} · build ${model.build}`, FIELD_WIDTH / 2, 604)
   ctx.globalAlpha = 1

@@ -44,9 +44,23 @@ export interface LoopOptions {
 /**
  * The largest real interval a single frame is allowed to represent.
  *
- * MAX_CATCH_UP_STEPS already bounds the work per frame; this bounds how much
- * time a stalled frame can *bank* for the frames after it, so a one-second hitch
- * cannot leave the game running fast for the next second trying to repay it.
+ * This is the load-bearing safeguard, and it is worth being precise about why,
+ * because the two mechanisms here are easy to mistake for independent.
+ *
+ * Because this equals the catch-up budget exactly, the clamp alone guarantees
+ * the step loop terminates on the accumulator: entering a frame the carried
+ * accumulator is always < FIXED_DT, so it can never exceed
+ * FIXED_DT + MAX_CATCH_UP_STEPS * FIXED_DT, and at most MAX_CATCH_UP_STEPS
+ * steps are ever owed. The `steps < MAX_CATCH_UP_STEPS` guard below is
+ * therefore a structural bound that never fires today — it is kept so that
+ * raising this constant can never turn into an unbounded loop, not because it
+ * does any work.
+ *
+ * The consequence worth being deliberate about: a device that *sustains* frames
+ * longer than this runs the game in slow motion rather than dropping time. That
+ * is the intended trade for a reflex game — dropping time teleports hazards
+ * past the kite, which reads as an unfair death — and at under 12 fps the game
+ * is unplayable either way. tests/loop.test.ts pins both behaviours.
  */
 const MAX_FRAME_SECONDS = MAX_CATCH_UP_STEPS * FIXED_DT
 
@@ -76,8 +90,11 @@ export function createLoop(callbacks: LoopCallbacks, options: LoopOptions = {}):
       steps += 1
     }
 
-    // Hit the cap with time still owed: drop the backlog rather than carry it
-    // into the next frame, which is exactly how a spiral of death starts.
+    // Unreachable while MAX_FRAME_SECONDS equals the catch-up budget (see the
+    // note there). Kept as the backstop that makes raising either constant safe:
+    // if the cap ever does bite, drop the backlog rather than carry it into the
+    // next frame, which is exactly how a spiral of death starts.
+    /* v8 ignore next -- structurally unreachable; see MAX_FRAME_SECONDS */
     if (accumulator >= FIXED_DT) accumulator = 0
 
     callbacks.render(accumulator / FIXED_DT)

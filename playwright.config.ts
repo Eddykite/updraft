@@ -28,6 +28,15 @@ export default defineConfig({
     baseURL,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
+    // Off by default: a video per test is slow and nobody watches the passing
+    // ones. PLAYWRIGHT_VIDEO=1 turns it on for the one thing automation cannot
+    // otherwise produce — a recording of the game actually being played, which
+    // the feel-tuning notes (spec §8.1) have to be argued from. Run it with
+    // `--workers=1`, because a loaded machine stretches the input schedule in
+    // e2e/game.ts and you get a recording of a kite flying into a column.
+    ...(process.env.PLAYWRIGHT_VIDEO
+      ? { video: { mode: 'on' as const, size: { width: 540, height: 960 } } }
+      : {}),
   },
   projects: [
     {

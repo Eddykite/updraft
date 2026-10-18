@@ -5,9 +5,10 @@ import {
   hasTouch,
   logicalPoint,
   openGame,
+  flyAndCrash,
   phase,
   score,
-  simulationReady,
+  seedBest,
   watchConsole,
 } from './game.js'
 
@@ -18,25 +19,11 @@ import {
  * actually start a run, that holding keeps the kite alive, that dying reaches the
  * game-over screen with a score on it, that restart works, and that the best
  * score survives a reload.
- *
- * Every test here skips itself with a reason while `src/game/update.ts` is still
- * the contract stub (GOK-4). That is deliberate and temporary: the suite names
- * the work and turns itself on the moment the simulation lands, rather than
- * being quietly omitted. Delete `requireSimulation` with the probe in
- * src/app/scenes.ts.
  */
-async function requireSimulation(page: import('@playwright/test').Page): Promise<void> {
-  const ready = await simulationReady(page)
-  test.skip(
-    !ready,
-    'the simulation body (GOK-4) has not landed yet: step() still throws `not implemented`',
-  )
-}
 
 test('a key press starts a run', async ({ page }) => {
   const errors = watchConsole(page)
   await openGame(page)
-  await requireSimulation(page)
 
   expect(await phase(page)).toBe('title')
   await page.keyboard.press('Space')
@@ -46,7 +33,6 @@ test('a key press starts a run', async ({ page }) => {
 
 test('a touch starts a run', async ({ page }) => {
   const canvas = await openGame(page)
-  await requireSimulation(page)
   test.skip(!(await hasTouch(page)), 'this project has no touch support')
 
   const middle = await logicalPoint(canvas, 270, 640)
@@ -56,7 +42,6 @@ test('a touch starts a run', async ({ page }) => {
 
 test('holding pins the kite to the ceiling without killing it', async ({ page }) => {
   await openGame(page)
-  await requireSimulation(page)
 
   await page.keyboard.down('Space')
   // Long enough to be pinned against the ceiling (the kite reaches y = 30 in
@@ -75,7 +60,6 @@ test('holding pins the kite to the ceiling without killing it', async ({ page })
 
 test('Esc pauses, and the press that resumes does not also climb', async ({ page }, testInfo) => {
   await openGame(page)
-  await requireSimulation(page)
 
   await page.keyboard.press('Space')
   await expect(page.locator('html')).toHaveAttribute('data-updraft-phase', 'playing')
@@ -96,60 +80,72 @@ test('Esc pauses, and the press that resumes does not also climb', async ({ page
 test('a deliberate crash reaches game over with the score shown', async ({ page }, testInfo) => {
   const errors = watchConsole(page)
   await openGame(page)
-  await requireSimulation(page)
 
   await page.keyboard.press('Space')
   await expect(page.locator('html')).toHaveAttribute('data-updraft-phase', 'playing')
   await captureScene(page, testInfo, 'playing')
 
-  // Let go of everything: gravity does the rest, and the ground is fatal.
-  await expect(page.locator('html')).toHaveAttribute('data-updraft-phase', 'gameover', {
-    timeout: 15_000,
-  })
+  // Fly the tape rather than just letting go, so the game-over card captured
+  // here is a screenshot of a game someone played. Nothing is asserted about the
+  // score it reaches — see SCORING_TAPE in game.ts for why a browser cannot
+  // promise one, and tests/playable.test.ts for where that *is* proved.
+  const finalScore = await flyAndCrash(page)
   await captureScene(page, testInfo, 'gameover')
 
-  expect(await score(page)).toBeGreaterThanOrEqual(0)
+  expect(finalScore).toBeGreaterThanOrEqual(0)
   expect(errors).toEqual([])
 })
 
-test('the game-over screen ignores a death-frame press, then restarts', async ({ page }) => {
+test('the game-over screen restarts on a press once the lock has expired', async ({ page }) => {
   await openGame(page)
-  await requireSimulation(page)
 
   await page.keyboard.press('Space')
-  // Catch the death on the frame it happens. `toHaveAttribute` polls every
-  // 100 ms, which can burn a quarter of the 400 ms lock before the press below
-  // is even sent; waitForFunction polls on rAF instead.
   await page.waitForFunction(
-    () => document.documentElement.dataset.updraftPhase === 'gameover',
+    () => document.documentElement.dataset['updraftPhase'] === 'gameover',
     undefined,
     { polling: 'raf', timeout: 15_000 },
   )
 
-  // Inside the 400 ms lock: this press must not burn the restart.
-  await page.keyboard.press('Space')
-  expect(await phase(page)).toBe('gameover')
-
+  // This no longer tries to land a press *inside* the 400 ms lock.
+  //
+  // The rAF polling above was an improvement on a 100 ms `toHaveAttribute`
+  // poll — but it narrows the race rather than closing it. Nothing bounds the
+  // time between the in-page frame that flips the phase and a CDP keypress
+  // arriving, so on a loaded machine the press lands after the lock expires,
+  // the run restarts, and the assertion fails for a reason that has nothing to
+  // do with the code. The only way to close it in a browser would be to
+  // dispatch a synthetic event from inside the same frame callback, which tests
+  // the synthetic event rather than the input path.
+  //
+  // So the lock is proved deterministically in tests/scenes.test.ts, where time
+  // is injected, and this test keeps the half only a browser can prove: that a
+  // real key event restarts a finished run.
   await page.waitForTimeout(500)
   await page.keyboard.press('Space')
   await expect(page.locator('html')).toHaveAttribute('data-updraft-phase', 'playing')
 })
 
-test('the best score survives a reload', async ({ page }) => {
+/**
+ * Persistence is asserted against a best score that is *known* to be non-zero,
+ * rather than one the test hopes to earn.
+ *
+ * The previous version played a run and compared the stored best to whatever
+ * that run scored. On a run that scored 0 — which is most of them, in a browser,
+ * for the reasons in SCORING_TAPE — it compared 0 to 0 and proved nothing.
+ * Seeding a known best makes every assertion below load-bearing on every
+ * machine: a run must not clobber a stored best, a reload must not lose it, and
+ * a score that does beat it must be the one that survives.
+ */
+test('a run never destroys the stored best, and a reload keeps it', async ({ page }) => {
+  const seeded = 4242
+  await seedBest(page, seeded)
   await openGame(page)
-  await requireSimulation(page)
+  expect(await best(page)).toBe(seeded)
 
-  // Fly well enough to score, then die.
-  await page.keyboard.down('Space')
-  await page.waitForTimeout(2600)
-  await page.keyboard.up('Space')
-  await expect(page.locator('html')).toHaveAttribute('data-updraft-phase', 'gameover', {
-    timeout: 20_000,
-  })
-
-  const finalScore = await score(page)
+  const finalScore = await flyAndCrash(page)
   const storedBest = await best(page)
-  expect(storedBest).toBeGreaterThanOrEqual(finalScore)
+  // Exactly the better of the two — never clobbered, never inflated.
+  expect(storedBest).toBe(Math.max(seeded, finalScore))
 
   await page.reload()
   await expect(page.locator('html')).toHaveAttribute('data-updraft', 'ready')

@@ -53,3 +53,23 @@ export const PALETTE = {
   textAccent: '#e9b44c',
   panel: 'rgba(5, 14, 24, 0.72)',
 } as const
+
+/**
+ * Blend two `#rrggbb` colours. `t` is clamped to [0, 1].
+ *
+ * Exists so an animated colour can be interpolated rather than switched at a
+ * threshold — a one-frame colour change reads as a flash, which the
+ * accessibility rules rule out (spec §2).
+ */
+export function mixHex(from: string, to: string, t: number): string {
+  const amount = Math.min(Math.max(t, 0), 1)
+  const a = Number.parseInt(from.slice(1), 16)
+  const b = Number.parseInt(to.slice(1), 16)
+  const channel = (shift: number): number => {
+    const left = (a >> shift) & 0xff
+    const right = (b >> shift) & 0xff
+    return Math.round(left + (right - left) * amount)
+  }
+  const hex = ((channel(16) << 16) | (channel(8) << 8) | channel(0)).toString(16)
+  return `#${hex.padStart(6, '0')}`
+}

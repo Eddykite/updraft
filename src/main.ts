@@ -84,8 +84,6 @@ function publishStatus(status: SceneStatus): void {
   dataset['updraftScore'] = String(status.score)
   dataset['updraftBest'] = String(status.best)
   dataset['updraftMuted'] = String(status.muted)
-  // TEMPORARY — goes away with probeSimulation in app/scenes.ts once GOK-4 lands.
-  dataset['updraftSimulation'] = status.simulationReady ? 'ready' : 'pending'
 }
 
 publishStatus(host.status())

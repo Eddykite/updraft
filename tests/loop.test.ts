@@ -48,6 +48,10 @@ function harness() {
     setNow(ms: number) {
       nowMs = ms
     },
+    /** The frame the loop is currently waiting on, without delivering it. */
+    pendingCallback() {
+      return pending
+    },
     /** Advance the wall clock by `ms` and deliver one animation frame. */
     tick(ms: number) {
       nowMs += ms
@@ -107,18 +111,40 @@ describe('createLoop', () => {
     expect(h.renders).toHaveLength(1)
   })
 
-  it('caps catch-up at MAX_CATCH_UP_STEPS and drops the backlog', () => {
+  it('bounds a long stall to MAX_CATCH_UP_STEPS and banks nothing', () => {
     const h = harness()
     h.loop.start()
-    // A tab that was hidden for ten seconds. Without the cap this is 600 steps,
-    // and the frame after it would owe another 600.
+    // A tab that was hidden for ten seconds. Without the clamp this is 600
+    // steps, and the frame after it would owe another 600.
     h.tick(10_000)
     expect(h.updates).toHaveLength(MAX_CATCH_UP_STEPS)
 
-    // The backlog is gone: the next ordinary frame is an ordinary frame.
+    // Nothing was banked: the next ordinary frame is an ordinary frame.
+    //
+    // Note this is the *clamp* on a single frame's elapsed time doing the work,
+    // not the step cap — the two are equal by construction, so the loop always
+    // exits on the accumulator and the cap never fires. See MAX_FRAME_SECONDS.
     h.updates.length = 0
     h.tick(20)
     expect(h.updates).toHaveLength(1)
+  })
+
+  it('runs in slow motion rather than dropping time when frames stay slow', () => {
+    const h = harness()
+    h.loop.start()
+    // Sustained 200 ms frames — about 5 fps. Each one is worth 12 steps of real
+    // time but only MAX_CATCH_UP_STEPS are ever run, and nothing is carried, so
+    // the game runs at roughly (5 / 12) of real speed indefinitely.
+    //
+    // This is the deliberate trade documented on MAX_FRAME_SECONDS: a reflex
+    // game that drops time teleports hazards past the kite, which reads as an
+    // unfair death. It is pinned here so the choice cannot be reversed silently.
+    for (let i = 0; i < 10; i += 1) h.tick(200)
+    expect(h.updates).toHaveLength(10 * MAX_CATCH_UP_STEPS)
+
+    const simulated = h.updates.length * FIXED_DT
+    expect(simulated).toBeLessThan(2.0) // two seconds of real time elapsed
+    expect(simulated).toBeCloseTo(10 * MAX_CATCH_UP_STEPS * FIXED_DT, 5)
   })
 
   it('reports an interpolation alpha in [0, 1)', () => {
@@ -168,5 +194,67 @@ describe('createLoop', () => {
     h.loop.resetClock()
     h.tick(20)
     expect(h.updates).toHaveLength(1)
+  })
+})
+
+/**
+ * The browser defaults, which every other test here bypasses by injecting.
+ *
+ * Without this the three one-line arrows that bind the loop to `performance.now`
+ * and `requestAnimationFrame` are the only part of the module never executed —
+ * and they are the part that actually runs in production. Stubbed on the global
+ * rather than mocked, so the test proves the loop reaches for the right API by
+ * the right name.
+ */
+describe('the default browser bindings', () => {
+  it('drive the loop through requestAnimationFrame and performance.now', () => {
+    const globals = globalThis as Record<string, unknown>
+    const saved = {
+      raf: globals['requestAnimationFrame'],
+      caf: globals['cancelAnimationFrame'],
+      performance: globals['performance'],
+    }
+
+    let pending: FrameRequestCallback | null = null
+    let cancelledHandle: number | null = null
+    globals['requestAnimationFrame'] = (callback: FrameRequestCallback): number => {
+      pending = callback
+      return 7
+    }
+    globals['cancelAnimationFrame'] = (handle: number): void => {
+      cancelledHandle = handle
+      pending = null
+    }
+    globals['performance'] = { now: () => 1000 }
+
+    try {
+      const updates: number[] = []
+      const loop = createLoop({ update: (dt) => updates.push(dt), render: () => {} })
+
+      loop.start()
+      expect(pending).not.toBeNull()
+
+      // One frame, 20 ms after the `performance.now()` the loop started from.
+      ;(pending as unknown as FrameRequestCallback)(1020)
+      expect(updates).toEqual([FIXED_DT])
+
+      loop.stop()
+      expect(cancelledHandle).toBe(7)
+    } finally {
+      globals['requestAnimationFrame'] = saved.raf
+      globals['cancelAnimationFrame'] = saved.caf
+      globals['performance'] = saved.performance
+    }
+  })
+
+  it('does nothing on a frame that arrives after stop()', () => {
+    const h = harness()
+    h.loop.start()
+    const stale = h.pendingCallback()
+    h.loop.stop()
+
+    stale?.(10_000)
+    expect(h.updates).toHaveLength(0)
+    expect(h.renders).toHaveLength(0)
   })
 })
