@@ -4,6 +4,7 @@ import {
   GATE_WIDTH,
   KITE_RADIUS,
   KITE_X,
+  THERMAL_LEAD,
   THERMAL_RADIUS,
 } from '../src/game/constants.js'
 import {
@@ -11,6 +12,7 @@ import {
   circlesIntersect,
   gateCentreX,
   hitsGateColumns,
+  thermalX,
   touchesThermal,
 } from '../src/game/collision.js'
 import type { Gate, Kite } from '../src/game/state.js'
@@ -149,11 +151,35 @@ describe('hitsGateColumns', () => {
   })
 })
 
+describe('thermalX', () => {
+  /**
+   * The ring leads its column rather than riding its centre line (spec §2.2).
+   * Pinned against the constants it is derived from, so that a change to the
+   * lead, the radius or the column width fails here rather than silently
+   * putting the ring inside the hazard it is meant to sit beside.
+   */
+  it('sits THERMAL_LEAD ahead of the column centre line', () => {
+    const g = gate({ x: 300 })
+    expect(gateCentreX(g)).toBe(335)
+    expect(thermalX(g)).toBe(335 - THERMAL_LEAD)
+    expect(thermalX(g)).toBe(g.x - 29)
+  })
+
+  it('leaves the ring 7 px of daylight from its own columns', () => {
+    const g = gate({ x: 300 })
+    // The ring's trailing rim against the column's leading edge.
+    expect(g.x - (thermalX(g) + THERMAL_RADIUS)).toBe(7)
+    expect(THERMAL_LEAD - THERMAL_RADIUS - GATE_WIDTH / 2).toBe(7)
+  })
+})
+
 describe('touchesThermal', () => {
-  const g = gate({ x: KITE_X - GATE_WIDTH / 2 }) // thermal centred on the kite's x
+  /** Gate x at which the ring — not the column centre — is level with the kite. */
+  const ON_THE_RING = KITE_X + THERMAL_LEAD - GATE_WIDTH / 2
+  const g = gate({ x: ON_THE_RING })
 
   it('collects when the circles touch exactly, and not one pixel short', () => {
-    expect(gateCentreX(g)).toBe(KITE_X)
+    expect(thermalX(g)).toBe(KITE_X)
     const reach = KITE_RADIUS + THERMAL_RADIUS
     expect(touchesThermal(kite(g.thermal.y - reach), g)).toBe(true)
     expect(touchesThermal(kite(g.thermal.y - reach - 1), g)).toBe(false)
@@ -161,13 +187,27 @@ describe('touchesThermal', () => {
     expect(touchesThermal(kite(g.thermal.y + reach + 1), g)).toBe(false)
   })
 
+  /**
+   * The ring arrives before its columns do, which is the whole mechanism: it is
+   * collectable while the columns are still 13 px clear of the kite's rim, and
+   * the trip back into the gap is what it costs.
+   */
+  it('is in reach while the columns are still clear of the kite', () => {
+    expect(touchesThermal(kite(g.thermal.y), g)).toBe(true)
+    expect(hitsGateColumns(kite(g.thermal.y), g)).toBe(false)
+    expect(g.x - (KITE_X + KITE_RADIUS)).toBe(13)
+  })
+
   it('never re-collects an already collected thermal', () => {
-    const collected = gate({ thermal: { ...g.thermal, collected: true } })
+    const collected = gate({ x: ON_THE_RING, thermal: { ...g.thermal, collected: true } })
     expect(touchesThermal(kite(collected.thermal.y), collected)).toBe(false)
   })
 
-  it('is out of reach horizontally once the gate has moved on', () => {
-    const away = gate({ x: KITE_X - GATE_WIDTH / 2 - (KITE_RADIUS + THERMAL_RADIUS + 1) })
+  it('is out of reach horizontally before the gate arrives and after it has gone', () => {
+    const reach = KITE_RADIUS + THERMAL_RADIUS
+    const ahead = gate({ x: ON_THE_RING + reach + 1 })
+    expect(touchesThermal(kite(ahead.thermal.y), ahead)).toBe(false)
+    const away = gate({ x: ON_THE_RING - reach - 1 })
     expect(touchesThermal(kite(away.thermal.y), away)).toBe(false)
   })
 })

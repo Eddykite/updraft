@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import {
   CEILING_Y,
-  FIELD_WIDTH,
   FIXED_DT,
   GAP_Y_MAX_EDGE,
   GAP_Y_MIN,
+  GATE_SPAWN_X,
   GATE_WIDTH,
   GROUND_Y,
   MULTIPLIER_CAP,
+  STREAK_MAX,
+  THERMAL_Y_MAX,
+  THERMAL_Y_MIN,
   VY_CLAMP,
 } from '../src/game/constants.js'
 import { nextFloat, createRng, type Rng } from '../src/game/rng.js'
@@ -76,14 +79,22 @@ function checkInvariants(state: GameState, seed: number, tick: number): void {
     if (gate.id <= previousId) fail('gates are not in spawn order')
     previousId = gate.id
     if (gate.x + GATE_WIDTH < 0) fail(`gate ${gate.id} was kept after leaving the field`)
-    if (gate.x > FIELD_WIDTH) fail(`gate ${gate.id} is beyond the right edge`)
+    if (gate.x > GATE_SPAWN_X) fail(`gate ${gate.id} is beyond its spawn point`)
     if (gate.gapY < GAP_Y_MIN - 1e-9) fail(`gate ${gate.id} gap starts above the legal band`)
     if (gate.gapY + gate.gapHeight > GAP_Y_MAX_EDGE + 1e-9) {
       fail(`gate ${gate.id} gap ends below the legal band`)
     }
-    const insideTop = gate.thermal.y - gate.thermal.radius > gate.gapY
-    const insideBottom = gate.thermal.y + gate.thermal.radius < gate.gapY + gate.gapHeight
-    if (!insideTop || !insideBottom) fail(`gate ${gate.id} thermal is not inside its gap`)
+    // v2: the ring's disc lies entirely OUTSIDE the gap band, which is the
+    // invariant that replaces v1's "strictly inside its gap". Under random
+    // input this is the cheap, always-on form of the spawner property test.
+    const offset = Math.abs(gate.thermal.y - (gate.gapY + gate.gapHeight / 2))
+    if (offset - gate.thermal.radius < gate.gapHeight / 2 - 1e-9) {
+      fail(`gate ${gate.id} thermal overlaps its gap band`)
+    }
+    if (gate.thermal.y < THERMAL_Y_MIN - 1e-9 || gate.thermal.y > THERMAL_Y_MAX + 1e-9) {
+      fail(`gate ${gate.id} thermal escapes the field band`)
+    }
+    if (state.streak > STREAK_MAX) fail(`streak ${state.streak} is above its cap`)
   }
 }
 

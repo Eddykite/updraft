@@ -1,19 +1,40 @@
 /**
- * Gate and thermal generation, and the reachability invariant (spec §2).
+ * Gate and thermal generation, the reachability invariant, and the side/centre
+ * rule (spec §2.3).
  *
  * The fairness rule. With net acceleration a = NET_LIFT_ACCEL (1400) and speed
  * clamp vmax = VY_CLAMP (560), the distance the kite can cover *and settle at*
  * within the inter-gate time T is
  *
  *   reach(T)          = (vmax² >= a·T·vmax/2) ? a·T²/4 : vmax·T - vmax²/a
- *   maxCentreDelta(T) = clamp(REACH_HEADROOM · reach(T), 120, 420)
+ *   maxCentreDelta(T) = clamp(REACH_HEADROOM · reach(T), 60, 420)
  *
  * The spawner must never place consecutive gap centres further apart than
  * `maxCentreDelta`. The 0.5 headroom is deliberate: a course that is only just
- * flyable is not fun. A property test over 10,000 seeds asserts this invariant,
- * plus that every gap sits inside field bounds and every thermal sits strictly
- * inside its gap (spec §3) — that test is what protects us against "unwinnable
- * run" bug reports.
+ * flyable is not fun. See MAX_CENTRE_DELTA_MIN on why that lower clamp is 60 and
+ * not v1's 120 — at 120 it would have started *overriding* the formula from
+ * about t = 124 s under the new ramp, which is the one way a guard can become
+ * the bug it was guarding against.
+ *
+ * **What is new in v2: the ring and the course compete for the same vertical
+ * budget.** Between two gates the kite has `reach(T)` of settled travel. The
+ * course asks for some of it (the change in gap centre); a collecting line asks
+ * for the rest (out to the ring and back). On a gate where the centre jumps a
+ * long way *away* from the ring, both bills come due at once and the ring stops
+ * being takeable at any survivable clearance — fake in the other direction,
+ * which the brief rules out as firmly as making it free. So the gap may move
+ * away from the ring's side freely, and *toward* it by at most 30·(1 - q) px.
+ *
+ * The side itself stays a fair coin and so does the direction, so the course is
+ * unbiased over a run and half of all gates are "tight" (flat approach,
+ * expensive ring) while half are "swinging" (a big course move, cheap ring).
+ * That 50/50 is by construction, at every difficulty.
+ *
+ * A property test over 10,000 seeds asserts all of it, plus that the gap sits
+ * inside the field, that every ring's disc lies entirely outside its gap band,
+ * that the gap's centre line never collects, that the ring clears both columns
+ * by 7 px, and that its centre stays inside [72, 872] (spec §3). That test is
+ * what protects us against "unwinnable run" bug reports in both directions.
  *
  * `T` is taken as `spawnInterval(elapsed)` — the interval at the moment the
  * *later* gate is created. Because the interval only ever shrinks, that is the
@@ -22,18 +43,20 @@
  */
 
 import {
-  FIELD_WIDTH,
   GAP_Y_MAX_EDGE,
   GAP_Y_MIN,
+  GATE_SPAWN_X,
   MAX_CENTRE_DELTA_MAX,
   MAX_CENTRE_DELTA_MIN,
   NET_LIFT_ACCEL,
   REACH_HEADROOM,
-  THERMAL_EDGE_INSET,
   THERMAL_RADIUS,
+  THERMAL_TOWARD_DELTA,
+  THERMAL_Y_MAX,
+  THERMAL_Y_MIN,
   VY_CLAMP,
 } from './constants.js'
-import { gapHeight, spawnInterval } from './difficulty.js'
+import { gapHeight, secondProgress, spawnInterval, thermalOutset } from './difficulty.js'
 import type { Gate } from './state.js'
 import { nextBool, nextRange, type Rng } from './rng.js'
 
@@ -54,27 +77,50 @@ export function maxCentreDelta(seconds: number): number {
   return Math.min(Math.max(raw, MAX_CENTRE_DELTA_MIN), MAX_CENTRE_DELTA_MAX)
 }
 
+/**
+ * How far the gap centre may move *toward* the ring's side at this difficulty.
+ *
+ * 30 px for the whole of phase 1, shrinking to 0 as phase 2 tightens — by the
+ * endgame a gate that carries a ring below you cannot also drop beneath you.
+ */
+export function thermalTowardDelta(elapsed: number): number {
+  return THERMAL_TOWARD_DELTA * (1 - secondProgress(elapsed))
+}
+
 /** The y of the middle of a gate's gap. */
 export function gapCentre(gate: Gate): number {
   return gate.gapY + gate.gapHeight / 2
 }
 
-/** Lowest gap centre that keeps the whole gap inside the field, for this gap height. */
-export function minCentre(height: number): number {
-  return GAP_Y_MIN + height / 2
+/**
+ * Lowest gap centre that keeps both the gap and *either* possible ring inside
+ * the field, for this gap height and outset.
+ *
+ * Lemma (spec §2.3): the band [minCentre, maxCentre] is non-empty iff
+ * `h + 2E <= 800`. The maximum of `h + 2E` over the whole ramp is 260 + 152 =
+ * 412, at t = 0, and it decreases from there — so the band is never empty, by a
+ * factor of two, and the ring's side can stay a fair coin at every difficulty.
+ */
+export function minCentre(height: number, outset: number): number {
+  return Math.max(GAP_Y_MIN + height / 2, THERMAL_Y_MIN + outset + height / 2)
 }
 
-/** Highest gap centre that keeps the whole gap inside the field, for this gap height. */
-export function maxCentre(height: number): number {
-  return GAP_Y_MAX_EDGE - height / 2
+/** Highest gap centre that keeps both the gap and either possible ring inside the field. */
+export function maxCentre(height: number, outset: number): number {
+  return Math.min(GAP_Y_MAX_EDGE - height / 2, THERMAL_Y_MAX - outset - height / 2)
 }
 
 /**
  * Generate the next gate.
  *
+ * **The RNG draw order is load-bearing for the golden replay, so it is specified
+ * rather than left to the implementation** (spec §2.3): side, then direction,
+ * then magnitude. Reordering these is a gameplay change and will fail
+ * tests/determinism.test.ts, which is the intended behaviour.
+ *
  * @param rng            generator state; thread the returned one through
  * @param id             id for the new gate
- * @param elapsed        run time, drives gap height and spawn interval
+ * @param elapsed        run time, drives gap height, outset and spawn interval
  * @param previousCentre gap centre of the previous gate, or null for the first gate
  */
 export function spawnGate(
@@ -84,41 +130,48 @@ export function spawnGate(
   previousCentre: number | null,
 ): [Rng, Gate] {
   const height = gapHeight(elapsed)
-  const floor = minCentre(height)
-  const ceiling = maxCentre(height)
+  const outset = thermalOutset(elapsed)
+  const low = minCentre(height, outset)
+  const high = maxCentre(height, outset)
 
-  let low = floor
-  let high = ceiling
-  if (previousCentre !== null) {
-    const delta = maxCentreDelta(spawnInterval(elapsed))
-    low = Math.max(low, previousCentre - delta)
-    high = Math.min(high, previousCentre + delta)
-    if (low > high) {
-      // Only reachable if a caller hands us a previous centre that is already
-      // outside the legal band for this gap height. Field bounds win — place the
-      // gap as close to the previous centre as the field allows, which is still
-      // the most reachable gate available.
-      low = high = Math.min(Math.max(previousCentre, floor), ceiling)
-    }
+  // Draw 1: which side of the gap the ring sits on. A fair coin, always, so the
+  // course has no vertical bias over a run.
+  const [afterSide, below] = nextBool(rng)
+  const u = below ? 1 : -1
+
+  let next: Rng
+  let centre: number
+  if (previousCentre === null) {
+    // First gate of a run: nothing to be reachable from, so the whole legal band
+    // is in play.
+    ;[next, centre] = nextRange(afterSide, low, high)
+  } else {
+    const capAway = maxCentreDelta(spawnInterval(elapsed))
+    const capToward = Math.min(capAway, thermalTowardDelta(elapsed))
+    // Draw 2: direction, relative to the ring's side. Also a fair coin, which is
+    // what makes exactly half the gates tight and half of them swinging.
+    const [afterToward, toward] = nextBool(afterSide)
+    // Draw 3: magnitude, inside whichever cap this direction earns.
+    const [afterMag, magnitude] = nextRange(afterToward, 0, toward ? capToward : capAway)
+    next = afterMag
+    // Clamping into the legal band can only *shorten* a move, so it can never
+    // violate the reachability cap — which is why field bounds and reachability
+    // cannot fight here the way they could in v1.
+    const moved = previousCentre + (toward ? 1 : -1) * u * magnitude
+    centre = Math.min(Math.max(moved, low), high)
   }
 
-  const [afterCentre, centre] = nextRange(rng, low, high)
-  const [afterSide, below] = nextBool(afterCentre)
-
-  // The thermal hugs one edge of the gap but stays clear of it: the inset (45)
-  // is larger than the thermal radius (22), so the ring is always strictly
-  // inside the gap however tight the gap gets.
-  const offset = height / 2 - THERMAL_EDGE_INSET
-
   return [
-    afterSide,
+    next,
     {
       id,
-      x: FIELD_WIDTH,
+      x: GATE_SPAWN_X,
       gapY: centre - height / 2,
       gapHeight: height,
       thermal: {
-        y: centre + (below ? offset : -offset),
+        // Outside the gap band, by at least THERMAL_RADIUS. This is the
+        // invariant that replaces v1's "strictly inside its gap".
+        y: centre + u * (height / 2 + outset),
         radius: THERMAL_RADIUS,
         collected: false,
       },

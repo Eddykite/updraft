@@ -1,96 +1,92 @@
 /**
  * Is a thermal a decision, or a formality? Measured without an autopilot.
  *
- * The autopilot answers "what happens when someone plays". This file answers
- * the prior question, and it answers it from the course geometry alone, so no
- * controller of mine can flatter or libel the design.
+ * The autopilot answers "what happens when someone plays". This file answers the
+ * prior question, and it answers it from the course geometry alone, so no
+ * controller of mine can flatter or libel the design. `cost.ts` then answers the
+ * third question — what the decision is *worth* — with the dynamics included.
  *
- * A thermal is only a *risk/reward* object if reaching it forces the kite
- * somewhere it would not otherwise go. Concretely, for a gate with gap
- * [gapY, gapY + h]:
+ * ## What changed, and why these functions are not the v1 ones
  *
- *   safe band     = [gapY + KITE_RADIUS, gapY + h - KITE_RADIUS]
- *                   every y in here clears both columns
- *   collect band  = [thermal.y - (THERMAL_RADIUS + KITE_RADIUS),
- *                    thermal.y + (THERMAL_RADIUS + KITE_RADIUS)]
+ * In v1 the ring sat strictly inside the gap, and the finding was that this made
+ * the layer fake: for a gate with gap [gapY, gapY + h],
  *
- * If those two overlap, the ring can be taken from a position that was already
- * safe, and the "risk" is zero. The number that matters is how much of the safe
- * band also collects: at 100%, the thermal is not a choice at all, it is a
- * participation trophy.
+ *   safe band    = [gapY + KITE_RADIUS, gapY + h - KITE_RADIUS]
+ *   collect band = [thermal.y ± (THERMAL_RADIUS + KITE_RADIUS)]
+ *
+ * always overlapped, so the ring could be taken from a position that was already
+ * safe — and past t = 77 s the gap's own centre line took it outright. The proof
+ * never mentioned the inset, which is why no retune could reach it.
+ *
+ * v2 inverts the argument rather than retuning it. The ring is outside the gap
+ * band by at least its own radius, and `searchForFreeCollect` below is the mirror
+ * of the v1 sweep: it looks for any (gap, outset, radius) combination where a
+ * surviving altitude still collects, and finds none. The v1 functions that
+ * measured "how much of the safe band also collects" are gone, because the
+ * answer is now zero by construction and a function that returns a constant is
+ * not an instrument.
  */
 
 import {
-  DIFFICULTY_RAMP_SECONDS,
   FIXED_DT,
   FIRST_GATE_DELAY,
-  GAP_BASE,
-  GAP_RANGE,
-  GAP_Y_MIN,
+  GATE_WIDTH,
   KITE_RADIUS,
   KITE_START_Y,
-  THERMAL_EDGE_INSET,
+  KITE_X,
+  THERMAL_LEAD,
   THERMAL_RADIUS,
 } from '../../src/game/constants.js'
-import { gapHeight, spawnInterval } from '../../src/game/difficulty.js'
+import { thermalX } from '../../src/game/collision.js'
+import { gapHeight, scrollSpeed, spawnInterval, thermalOutset } from '../../src/game/difficulty.js'
 import { gapCentre, spawnGate } from '../../src/game/spawner.js'
 import { createRng } from '../../src/game/rng.js'
 import type { Gate } from '../../src/game/state.js'
+
+/** How close the kite's centre must come to the ring's to collect it. */
+const COLLECT_REACH = KITE_RADIUS + THERMAL_RADIUS
 
 export interface GateGeometry {
   readonly elapsed: number
   /** Width (px) of the band of kite altitudes that clears both columns. */
   readonly safeBand: number
-  /** Width (px) of that band which ALSO touches the thermal. */
+  /** Width (px) of that band which ALSO touches the ring. Zero, in v2, always. */
   readonly freeCollect: number
-  /** How far outside the safe band the ring's centre sits. <= 0 means it is inside. */
+  /**
+   * How far outside the safe band the ring's centre sits. Positive in v2 —
+   * under v1 this was always negative, which was the whole problem.
+   */
   readonly exposure: number
   /** Clearance (px) to the nearer column when flying the gap centre. */
   readonly clearanceOnCentre: number
-  /** Clearance (px) to the nearer column at the best altitude that still collects. */
-  readonly clearanceCollecting: number
   /**
-   * Margin the player gives up to collect, in px: `clearanceOnCentre -
-   * clearanceCollecting`.
-   *
-   * This, not `exposure`, is the number that decides whether the risk layer
-   * exists. `exposure` asks "is collecting *possible* from safety", which the
-   * proof below shows is always yes. The real question is what collecting
-   * *costs*, and a cost of 0 means the safest line in the game already takes the
-   * ring — at which point there was never a decision to make.
+   * How far the kite has to leave the gap centre to touch the ring at all,
+   * ignoring the trip back. The static half of the cost; `cost.ts` has the half
+   * that depends on the dynamics, which is the one that decides the question.
    */
-  readonly marginCost: number
+  readonly excursion: number
+  /** Px of daylight between the ring's disc and the gap's centre line. */
+  readonly centreLineMiss: number
 }
 
 /** Measure one gate. */
 export function measureGate(gate: Gate): Omit<GateGeometry, 'elapsed'> {
   const safeLow = gate.gapY + KITE_RADIUS
   const safeHigh = gate.gapY + gate.gapHeight - KITE_RADIUS
-  const reach = THERMAL_RADIUS + KITE_RADIUS
-  const collectLow = gate.thermal.y - reach
-  const collectHigh = gate.thermal.y + reach
+  const collectLow = gate.thermal.y - COLLECT_REACH
+  const collectHigh = gate.thermal.y + COLLECT_REACH
 
   const overlap = Math.max(0, Math.min(safeHigh, collectHigh) - Math.max(safeLow, collectLow))
-  const edge = Math.min(gate.thermal.y - safeLow, safeHigh - gate.thermal.y)
-
-  // Clearance is maximised at the gap centre and falls off linearly either way,
-  // so the best collecting altitude is simply the point of the collect band
-  // nearest the centre — clamped into the safe band, which the proof below shows
-  // is never empty here.
-  const centre = gate.gapY + gate.gapHeight / 2
-  const best = Math.min(
-    Math.max(Math.min(Math.max(centre, collectLow), collectHigh), safeLow),
-    safeHigh,
-  )
-  const clearance = (y: number): number => Math.min(y - safeLow, safeHigh - y)
+  const centre = gapCentre(gate)
+  const offset = Math.abs(gate.thermal.y - centre)
 
   return {
     safeBand: Math.max(0, safeHigh - safeLow),
     freeCollect: overlap,
-    exposure: -edge,
-    clearanceOnCentre: clearance(centre),
-    clearanceCollecting: clearance(best),
-    marginCost: clearance(centre) - clearance(best),
+    exposure: offset - (gate.gapHeight / 2 - KITE_RADIUS),
+    clearanceOnCentre: gate.gapHeight / 2 - KITE_RADIUS,
+    excursion: Math.max(0, offset - COLLECT_REACH - (gate.gapHeight / 2 - KITE_RADIUS)),
+    centreLineMiss: offset - COLLECT_REACH,
   }
 }
 
@@ -104,8 +100,6 @@ export function sampleCourse(seed: number, seconds: number): GateGeometry[] {
   let previousCentre: number | null = KITE_START_Y
   const out: GateGeometry[] = []
 
-  // Step the spawn clock the way the simulation does, so gates land at the same
-  // elapsed times and therefore the same gap heights.
   let elapsed = 0
   let spawnTimer = FIRST_GATE_DELAY
   let id = 0
@@ -125,172 +119,121 @@ export function sampleCourse(seed: number, seconds: number): GateGeometry[] {
 }
 
 /**
- * Brute-force the claim that the risk layer cannot be rescued by retuning.
+ * The v2 claim, brute-forced: with the ring outside the gap band there is **no**
+ * surviving altitude that collects, for any gap, outset or radius.
  *
- * The proof is two lines, but a proof I wrote about my own design is worth
- * checking against a machine. For a gate with gap [0, h], kite radius Rk and
- * thermal radius Rt:
+ * The proof is two lines, but a proof written about one's own design is worth
+ * checking against a machine — and this one is load-bearing twice over, because
+ * it is the exact mirror of the v1 sweep that sank the old placement. For a gate
+ * with gap [0, h], kite radius Rk, ring radius Rt and outset E >= Rt, the ring
+ * sits at `-E` (above) or `h + E` (below):
  *
  *   survives  <=>  y in [Rk, h - Rk]
- *   thermal strictly inside the gap  =>  ty in [Rt, h - Rt]
  *   collects  <=>  |y - ty| <= Rt + Rk
  *
- * Let y* = clamp(ty, Rk, h - Rk) — a surviving position by construction. If
- * ty < Rk then |y* - ty| = Rk - ty <= Rk - Rt <= Rk + Rt, so y* collects.
- * Symmetrically at the top; otherwise y* = ty. So a safe collecting position
- * always exists, for every h, Rt, Rk and every placement rule. The inset does
- * not appear in the argument, which is exactly why retuning it cannot help.
+ * Take the ring below, at ty = h + E. The nearest surviving altitude is h - Rk,
+ * so the closest approach is `E + Rk`, and collecting needs `E + Rk <= Rt + Rk`,
+ * i.e. `E <= Rt`. With `E >= Rt` that holds only at `E = Rt` exactly, where it
+ * is a touch rather than an overlap — and at that boundary the collecting kite
+ * is at `h - Rk`, the very edge of the safe band, which is the statement the
+ * spec's invariant makes: *collecting means leaving the corridor completely*.
  *
- * One precondition, stated because this proof is load-bearing for the whole
- * recommendation: it needs h >= 2*Rk, or the safe band is empty and clamping has
- * nothing to clamp into. UPDRAFT never gets near that — the ramp bottoms out at a
- * 150px gap against 2*Rk = 32px — and the sweep below skips those combinations
- * explicitly rather than counting them as safe.
- *
- * Returns the number of (h, Rt, ty) combinations that admit a risky thermal.
- * It should be 0.
+ * Returns the combinations tested and the number that admit a free collect
+ * strictly inside the safe band. It should be 0.
  */
-export function searchForRiskyPlacement(): { tested: number; risky: number } {
+export function searchForFreeCollect(): { tested: number; free: number; tightest: number } {
   let tested = 0
-  let risky = 0
+  let free = 0
+  let tightest = Infinity
   const Rk = KITE_RADIUS
-  for (let h = 100; h <= 300; h += 5) {
-    // The proof's one precondition: below this the safe band is empty and the
-    // gate is unflyable with or without a ring. Skipped rather than counted, so
-    // `tested` is exactly the set the claim is made about.
+  for (let h = 100; h <= 300; h += 2) {
     if (h < 2 * Rk) continue
     for (let Rt = 4; Rt <= 60; Rt += 2) {
-      if (2 * Rt > h) continue
-      for (let ty = Rt; ty <= h - Rt; ty += 1) {
+      for (let E = Rt; E <= Rt + 60; E += 1) {
         tested += 1
-        const safeLow = Rk
-        const safeHigh = h - Rk
-        const nearest = Math.min(Math.max(ty, safeLow), safeHigh)
-        // "Risky" would mean: no surviving altitude is close enough to collect.
-        if (Math.abs(nearest - ty) > Rt + Rk) risky += 1
+        // Closest a surviving kite can come to the ring's centre.
+        const closest = E + Rk
+        const slack = closest - (Rt + Rk)
+        tightest = Math.min(tightest, slack)
+        if (slack < 0) free += 1
       }
     }
   }
-  return { tested, risky }
+  return { tested, free, tightest }
 }
 
 /**
- * What collecting costs, across the whole difficulty ramp. Seed-independent:
- * it depends only on the gap height, which is a pure function of elapsed time.
- *
- * The shape of this table is the finding. The cost does not rise with
- * difficulty, it *falls* — and reaches exactly zero before the ramp finishes,
- * because the collect reach (THERMAL_RADIUS + KITE_RADIUS = 38) eventually
- * exceeds the ring's offset from the gap centre (h/2 - THERMAL_EDGE_INSET).
- * Past that point the safest line in the game collects the ring for free.
+ * Where the gap's own centre line stands relative to the collect disc, across
+ * the ramp. In v1 this crossed zero at t = 77 s and stayed there; in v2 it never
+ * does, and the margin is smallest — not largest — at the asymptote.
  */
-export function costAcrossTheRamp(): string {
-  const reach = THERMAL_RADIUS + KITE_RADIUS
-  const rows = [0, 15, 30, 45, 60, 75, 90].map((elapsed) => {
+export function centreLineMissAcrossTheRamp(): string {
+  const rows = [0, 15, 30, 45, 60, 75, 90, 150, 270].map((elapsed) => {
     const h = gapHeight(elapsed)
-    const offset = h / 2 - THERMAL_EDGE_INSET
-    const onCentre = h / 2 - KITE_RADIUS
-    const cost = Math.max(0, offset - reach)
+    const offset = h / 2 + thermalOutset(elapsed)
     return [
-      `  t=${`${elapsed}s`.padStart(4)}`,
+      `  t=${`${elapsed}s`.padStart(5)}`,
       `gap ${h.toFixed(0).padStart(3)}px`,
-      `margin on the centre line ${onCentre.toFixed(0).padStart(3)}px`,
-      `cost to collect ${cost.toFixed(0).padStart(3)}px`,
-      `(${((100 * cost) / onCentre).toFixed(0).padStart(3)}% of it)`,
+      `outset ${thermalOutset(elapsed).toFixed(0).padStart(2)}px`,
+      `ring sits ${offset.toFixed(0).padStart(3)}px off the centre line`,
+      `which misses the collect disc by ${(offset - COLLECT_REACH).toFixed(0).padStart(3)}px`,
     ].join('  ')
   })
-
-  // h/2 - INSET = reach  =>  h = 2*(reach + INSET)
-  const freeAt = 2 * (reach + THERMAL_EDGE_INSET)
-  const p = (GAP_BASE - freeAt) / GAP_RANGE
-  const when = p >= 1 ? null : p * DIFFICULTY_RAMP_SECONDS
-
   return [
     ...rows,
     '',
-    `  The ring is touchable from ${reach}px away (THERMAL_RADIUS ${THERMAL_RADIUS} + KITE_RADIUS ${KITE_RADIUS})`,
-    `  and sits h/2 - ${THERMAL_EDGE_INSET} from the gap centre, so the centre line collects it`,
-    when === null
-      ? `  at every gap height the ramp produces — the cost is always zero.`
-      : `  outright once the gap is under ${freeAt.toFixed(0)}px, i.e. from t=${when.toFixed(0)}s onward.`,
-    `  (GAP_Y_MIN ${GAP_Y_MIN} is irrelevant here — this is all gap-relative.)`,
+    `  The ring is touchable from ${COLLECT_REACH}px away (THERMAL_RADIUS ${THERMAL_RADIUS} + KITE_RADIUS ${KITE_RADIUS})`,
+    '  and never comes within that of the gap centre, at any difficulty. Under v1',
+    '  the centre line collected it outright from t=77s onward.',
   ].join('\n')
 }
 
 /**
- * At what nerve does a player start declining rings at all?
+ * How much of the kite's between-gate travel budget each half of the game asks
+ * for, and whether they can both be served.
  *
- * The `opportunist` profile takes a ring only when the cheapest collecting line
- * still leaves it `riskTolerance` px of clearance to the nearer column. That
- * clearance is not a distribution — it is a closed form:
- *
- *   cheapest line = centre + sign * max(0, h/2 - INSET - reach)
- *   clearance     = min(h/2 - KITE_RADIUS, INSET + THERMAL_RADIUS)
- *
- * The gap height cancels out entirely in the second branch, so the clearance is a
- * flat INSET + THERMAL_RADIUS = 67px for most of the ramp and `h/2 -
- * KITE_RADIUS` (59px) once the gap is tight. So the "opportunist" is a step
- * function of its own tolerance: at or below the floor it is the collector, above
- * the ceiling it is the safe line, and only the sliver between them declines
- * selectively — and then only on the hardest gates.
- *
- * This is why quoting "a cautious player still takes 70% of rings" was an
- * identity rather than a measurement (GOK-14). The knee is the real statement.
+ * The ring and the course spend the same budget (spec §2.3), which is why the
+ * spawner caps how far the gap may close on the ring's side. This prints the two
+ * bills side by side so the cap can be argued about with numbers.
  */
-export function opportunistKnee(): {
-  /** At or below this tolerance the opportunist declines nothing, at any difficulty. */
-  readonly floor: number
-  /** Above this tolerance it declines everything, at any difficulty. */
-  readonly ceiling: number
-  /** Gap height at which the clearance stops being flat and starts tracking h. */
-  readonly tightensBelowGap: number
-} {
-  const clearanceOnCheapestLine = (h: number): number =>
-    Math.min(h / 2 - KITE_RADIUS, THERMAL_EDGE_INSET + THERMAL_RADIUS)
-  const over = [gapHeight(0), gapHeight(DIFFICULTY_RAMP_SECONDS)].map(clearanceOnCheapestLine)
-  return {
-    floor: Math.min(...over),
-    ceiling: Math.max(...over),
-    tightensBelowGap: 2 * (THERMAL_EDGE_INSET + THERMAL_RADIUS + KITE_RADIUS),
-  }
+export function verticalBudget(): Array<{
+  elapsed: number
+  reachBetweenGates: number
+  courseAsks: number
+  ringAsks: number
+  spare: number
+}> {
+  return [0, 45, 90, 150, 210, 270].map((elapsed) => {
+    const h = gapHeight(elapsed)
+    const offset = h / 2 + thermalOutset(elapsed)
+    // What the detour asks for: out past the shallowest collecting altitude and
+    // back inside the safe band.
+    const ringAsks = 2 * Math.max(0, offset - COLLECT_REACH - (h / 2 - KITE_RADIUS))
+    // What the course can ask for on a gate that closes on the ring's side.
+    const courseAsks = Math.min(30, 30 * 1)
+    const seconds = spawnInterval(elapsed)
+    const reachBetweenGates = 1400 * seconds * seconds * 0.25
+    return {
+      elapsed,
+      reachBetweenGates,
+      courseAsks,
+      ringAsks,
+      spare: reachBetweenGates - courseAsks - ringAsks,
+    }
+  })
 }
 
 /**
- * Could retuning rescue the risk layer, if "risky" is relaxed from *impossible
- * from safety* to merely *expensive*?
- *
- * `searchForRiskyPlacement` proves the strong form is unachievable. This asks
- * the weaker and more useful question: holding the signed-off invariant that the
- * ring sits strictly inside the gap, how much margin can any (inset, ring
- * radius) pair make collecting cost at maximum difficulty?
- *
- * Returns the best achievable cost and the pair that achieves it, so the
- * trade-off can be argued about with numbers instead of taste.
+ * How much time the detour actually gets, which is the quantity the whole
+ * mechanism rests on: the ring leads the column by THERMAL_LEAD, so a kite that
+ * left the corridor has `(THERMAL_LEAD - GATE_WIDTH/2 - KITE_RADIUS) / speed`
+ * seconds before the gap constraint bites.
  */
-export function bestAchievableCost(): {
-  readonly gap: number
-  readonly marginOnCentre: number
-  readonly best: { inset: number; radius: number; cost: number; ringToColumn: number }
-  readonly atCurrentRadius: { inset: number; cost: number; ringToColumn: number }
-} {
-  const h = gapHeight(DIFFICULTY_RAMP_SECONDS)
-  const marginOnCentre = h / 2 - KITE_RADIUS
+export function detourWindow(elapsed: number): number {
+  return (THERMAL_LEAD - GATE_WIDTH / 2 - KITE_RADIUS) / scrollSpeed(elapsed)
+}
 
-  let best = { inset: THERMAL_EDGE_INSET, radius: THERMAL_RADIUS, cost: -1, ringToColumn: 0 }
-  let atCurrentRadius = { inset: THERMAL_EDGE_INSET, cost: -1, ringToColumn: 0 }
-
-  for (let radius = 4; radius <= THERMAL_RADIUS; radius += 1) {
-    const reach = radius + KITE_RADIUS
-    // Strictly inside the gap requires inset > radius; a ring flush against the
-    // column reads as part of the hazard, so insist on 4px of daylight.
-    for (let inset = radius + 4; inset <= h / 2; inset += 1) {
-      const cost = Math.max(0, h / 2 - inset - reach)
-      const ringToColumn = inset - radius
-      if (cost > best.cost) best = { inset, radius, cost, ringToColumn }
-      if (radius === THERMAL_RADIUS && cost > atCurrentRadius.cost) {
-        atCurrentRadius = { inset, cost, ringToColumn }
-      }
-    }
-  }
-  return { gap: h, marginOnCentre, best, atCurrentRadius }
+/** Where the ring is, in x, relative to the kite, when its gate is at `gateX`. */
+export function ringOffsetFromKite(gateX: number): number {
+  return thermalX({ x: gateX } as Gate) - KITE_X
 }

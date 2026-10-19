@@ -1,18 +1,24 @@
 import { describe, expect, it } from 'vitest'
 import {
-  FIELD_WIDTH,
   FIRST_GATE_DELAY,
   GAP_Y_MAX_EDGE,
   GAP_Y_MIN,
+  GATE_SPAWN_X,
+  GATE_WIDTH,
+  KITE_RADIUS,
   KITE_START_Y,
   MAX_CENTRE_DELTA_MAX,
   MAX_CENTRE_DELTA_MIN,
   NET_LIFT_ACCEL,
   REACH_HEADROOM,
   THERMAL_RADIUS,
+  THERMAL_TOWARD_DELTA,
+  THERMAL_Y_MAX,
+  THERMAL_Y_MIN,
   VY_CLAMP,
 } from '../src/game/constants.js'
-import { gapHeight, spawnInterval } from '../src/game/difficulty.js'
+import { thermalX } from '../src/game/collision.js'
+import { gapHeight, scrollSpeed, spawnInterval, thermalOutset } from '../src/game/difficulty.js'
 import { createRng } from '../src/game/rng.js'
 import {
   gapCentre,
@@ -21,35 +27,48 @@ import {
   minCentre,
   reach,
   spawnGate,
+  thermalTowardDelta,
 } from '../src/game/spawner.js'
 import type { Gate } from '../src/game/state.js'
 
 /**
  * Spawner (spec §3).
  *
- * The headline test is the property test at the bottom: 10,000 seeds, every
- * consecutive gate pair reachable, every gap inside the field, every thermal
- * strictly inside its gap. It is the thing standing between us and "unwinnable
- * run" bug reports, so it runs over the same schedule update.ts uses rather than
- * over a convenient one.
+ * The headline test is the property test at the bottom: 10,000 seeds, and the
+ * five invariants that replace v1's single *every thermal sits strictly inside
+ * its gap*. That one assertion was the premise of the proof on GOK-14 that the
+ * risk layer was fake; its mirror is what makes the layer real.
+ *
+ * **It now runs the whole ramp, not the first 45 s of it.** v1's 40 gates per
+ * seed was commented as covering "the whole difficulty ramp and out the far
+ * side", which was true while the ramp stopped at 90 s and stops being true the
+ * moment it does not. Covering to 300 s is 8.5x the gates — and measures out at
+ * about two seconds, so there was never a reason to buy coverage with a targeted
+ * sweep instead.
  */
 
 const SEEDS = 10_000
-/** ~45 s of play per seed: through the whole difficulty ramp and out the far side. */
-const GATES_PER_SEED = 40
+/**
+ * Out past the last published checkpoint (t = 270 s), so every seed flies the
+ * whole of phase 1, the junction, and three and a half half-lives of phase 2.
+ */
+const SECONDS_PER_SEED = 300
+
+/** The reach a kite has to the ring, and to a thermal it should never reach. */
+const COLLECT_REACH = KITE_RADIUS + THERMAL_RADIUS
 
 /**
- * Generate one seed's course on exactly the schedule update.ts spawns on:
- * the first gate at FIRST_GATE_DELAY placed relative to where the kite starts,
- * then one gate every spawnInterval(elapsed).
+ * Generate one seed's course on exactly the schedule update.ts spawns on: the
+ * first gate at FIRST_GATE_DELAY placed relative to where the kite starts, then
+ * one gate every spawnInterval(elapsed).
  */
-function course(seed: number, count: number): Array<{ gate: Gate; elapsed: number }> {
+function course(seed: number, seconds: number): Array<{ gate: Gate; elapsed: number }> {
   let rng = createRng(seed)
   let elapsed = FIRST_GATE_DELAY
   let previousCentre: number | null = KITE_START_Y
   const gates: Array<{ gate: Gate; elapsed: number }> = []
 
-  for (let id = 0; id < count; id += 1) {
+  for (let id = 0; elapsed < seconds; id += 1) {
     const [next, gate] = spawnGate(rng, id, elapsed, previousCentre)
     rng = next
     gates.push({ gate, elapsed })
@@ -92,32 +111,108 @@ describe('reach', () => {
 })
 
 describe('maxCentreDelta', () => {
-  it('is half the reach, clamped into [120, 420]', () => {
+  it('is half the reach, clamped into [60, 420]', () => {
     expect(maxCentreDelta(0)).toBe(MAX_CENTRE_DELTA_MIN)
     expect(maxCentreDelta(100)).toBe(MAX_CENTRE_DELTA_MAX)
     const t = 1.2
     expect(maxCentreDelta(t)).toBeCloseTo(REACH_HEADROOM * reach(t), 9)
   })
 
-  it('is never more than half of what the kite can actually do', () => {
-    for (let t = 0.1; t <= 3; t += 0.1) {
-      expect(maxCentreDelta(t)).toBeLessThanOrEqual(Math.max(REACH_HEADROOM * reach(t), 120) + 1e-9)
+  /**
+   * The v1 bug this constant carried, stated as a test rather than a comment.
+   *
+   * A clamp is a guard; the moment it starts *raising* the permitted jump above
+   * what the formula allows, it has become the hazard it was guarding against.
+   * At 120 that happens below T = 0.828 s — which v1 never reached and v2 does,
+   * from about t = 124 s. At 60 it binds only below T = 0.586 s, under the
+   * interval floor, so it is inert for every interval the game can ask for.
+   */
+  it('never overrides the formula at any interval the ramp can produce', () => {
+    for (let t = 0; t <= 3600; t += 10) {
+      const interval = spawnInterval(t)
+      expect(maxCentreDelta(interval)).toBeCloseTo(REACH_HEADROOM * reach(interval), 9)
+    }
+    // And the floor is where it is for a reason: at v1's 120 this fails.
+    expect(REACH_HEADROOM * reach(spawnInterval(3600))).toBeGreaterThan(MAX_CENTRE_DELTA_MIN)
+    expect(REACH_HEADROOM * reach(spawnInterval(3600))).toBeLessThan(120)
+  })
+
+  it('leaves real headroom across both ramps', () => {
+    for (const t of [0, 45, 90, 150, 210, 270, 600]) {
+      const interval = spawnInterval(t)
+      expect(maxCentreDelta(interval)).toBeLessThan(reach(interval))
     }
   })
 
-  it('leaves real headroom across the whole difficulty ramp', () => {
-    // Every interval the game can actually ask for, from 1.6 s down to 0.9 s.
-    for (const t of [0.9, 1.0, 1.25, 1.4, 1.6]) {
-      expect(maxCentreDelta(t)).toBeLessThan(reach(t))
+  /** The gap floor's derivation (spec §2.4) depends on this number being 80.9. */
+  it('is 80.9 px at the interval floor, which is what sets the 110 px gap', () => {
+    expect(maxCentreDelta(1.6 - 0.7 - 0.22)).toBeCloseTo(80.9, 1)
+  })
+})
+
+describe('thermalTowardDelta', () => {
+  it('is a flat 30 px for the whole of phase 1 and shrinks to nothing after it', () => {
+    for (const t of [0, 45, 90]) expect(thermalTowardDelta(t)).toBeCloseTo(THERMAL_TOWARD_DELTA, 9)
+    expect(thermalTowardDelta(150)).toBeCloseTo(15, 9)
+    expect(thermalTowardDelta(210)).toBeCloseTo(7.5, 9)
+    expect(thermalTowardDelta(600)).toBeLessThan(0.1)
+    expect(thermalTowardDelta(600)).toBeGreaterThan(0)
+  })
+})
+
+describe('the legal centre band', () => {
+  /**
+   * The lemma of spec §2.3: the band is non-empty iff h + 2E <= 800, and the
+   * maximum of h + 2E over the whole ramp is 412, at t = 0. Both sides of the
+   * gap therefore always have room for a ring, which is what lets the side stay
+   * a fair coin at every difficulty rather than being quietly biased on tight
+   * gates.
+   */
+  it('is never empty, and by a factor of two', () => {
+    for (let t = 0; t <= 3600; t += 5) {
+      const h = gapHeight(t)
+      const outset = thermalOutset(t)
+      expect(h + 2 * outset).toBeLessThanOrEqual(800)
+      expect(maxCentre(h, outset) - minCentre(h, outset)).toBeGreaterThan(0)
     }
+    expect(gapHeight(0) + 2 * thermalOutset(0)).toBeCloseTo(412, 6)
+  })
+
+  /**
+   * Worth knowing, and not obvious from the spec's two `max`/`min` expressions:
+   * the ring's bound is the active one on both edges at *every* difficulty, so
+   * GAP_Y_MIN and GAP_Y_MAX_EDGE never actually bind. Even at the outset floor,
+   * `THERMAL_Y_MIN + E` = 94 against GAP_Y_MIN's 80, and `THERMAL_Y_MAX - E` =
+   * 850 against GAP_Y_MAX_EDGE's 870.
+   *
+   * That means the v1 field constants are now inherited slack rather than live
+   * limits. They are left in place because they still describe the gap's own
+   * legal band and the renderer's sky and ground are drawn to them — but a
+   * future retune should know that moving them changes nothing until it moves
+   * them by more than 14 px.
+   */
+  it('is bounded by the ring, not by the gap, at every difficulty', () => {
+    for (const t of [0, 45, 90, 270, 600, 3600]) {
+      const h = gapHeight(t)
+      const outset = thermalOutset(t)
+      expect(minCentre(h, outset)).toBeGreaterThan(GAP_Y_MIN + h / 2)
+      expect(maxCentre(h, outset)).toBeLessThan(GAP_Y_MAX_EDGE - h / 2)
+    }
+    // The slack at its narrowest, i.e. at the outset floor.
+    const h = gapHeight(600)
+    expect(minCentre(h, 22) - (GAP_Y_MIN + h / 2)).toBeCloseTo(14, 9)
+    expect(GAP_Y_MAX_EDGE - h / 2 - maxCentre(h, 22)).toBeCloseTo(20, 9)
   })
 })
 
 describe('spawnGate', () => {
-  it('spawns at the right-hand edge, unpassed, with an uncollected thermal', () => {
+  it('spawns off-screen, unpassed, with an uncollected thermal', () => {
     const [, gate] = spawnGate(createRng(42), 7, 0, null)
     expect(gate.id).toBe(7)
-    expect(gate.x).toBe(FIELD_WIDTH)
+    // 604, not 540: the ring rides 64 px ahead, so at 540 it would pop into
+    // view 29 px inside the right edge instead of entering from off-screen.
+    expect(gate.x).toBe(GATE_SPAWN_X)
+    expect(thermalX(gate)).toBeGreaterThan(540)
     expect(gate.passed).toBe(false)
     expect(gate.thermal.collected).toBe(false)
     expect(gate.thermal.radius).toBe(THERMAL_RADIUS)
@@ -134,15 +229,25 @@ describe('spawnGate', () => {
     expect(second.gapY).not.toBe(first.gapY)
   })
 
-  it('puts the thermal on one side of the gap or the other, by RNG', () => {
+  it('puts the thermal outside one side of the gap or the other, by RNG', () => {
     const sides = new Set<string>()
     let rng = createRng(5)
     for (let i = 0; i < 20; i += 1) {
       const [next, gate] = spawnGate(rng, i, 0, null)
       rng = next
       sides.add(gate.thermal.y > gapCentre(gate) ? 'below' : 'above')
+      // Outside, every time — never the v1 placement.
+      expect(Math.abs(gate.thermal.y - gapCentre(gate))).toBeGreaterThan(gate.gapHeight / 2)
     }
     expect(sides).toEqual(new Set(['above', 'below']))
+  })
+
+  it('draws side, then direction, then magnitude — the order the golden file depends on', () => {
+    // Changing the order changes every course from the same seed. This pins it
+    // as a contract rather than leaving it to be rediscovered from a diff.
+    const [, withPrevious] = spawnGate(createRng(31337), 0, 10, 500)
+    expect(withPrevious.gapY).toBeCloseTo(358.597687, 6)
+    expect(withPrevious.thermal.y).toBeCloseTo(293.931021, 6)
   })
 
   it('honours the reachability limit against the previous centre', () => {
@@ -156,13 +261,14 @@ describe('spawnGate', () => {
     }
   })
 
-  it('falls back to the nearest legal centre if asked for an impossible one', () => {
-    // A previous centre far outside the legal band for this gap height: field
-    // bounds win, and the gap is placed as close to it as the field allows.
+  it('clamps an impossible previous centre into the legal band', () => {
+    // Clamping can only ever shorten a move, so it cannot break reachability.
+    const h = gapHeight(0)
+    const outset = thermalOutset(0)
     const [, high] = spawnGate(createRng(1), 0, 0, 10_000)
-    expect(gapCentre(high)).toBeCloseTo(maxCentre(gapHeight(0)), 9)
+    expect(gapCentre(high)).toBeCloseTo(maxCentre(h, outset), 9)
     const [, low] = spawnGate(createRng(1), 0, 0, -10_000)
-    expect(gapCentre(low)).toBeCloseTo(minCentre(gapHeight(0)), 9)
+    expect(gapCentre(low)).toBeCloseTo(minCentre(h, outset), 9)
   })
 
   it('explores the whole legal band when it is unconstrained', () => {
@@ -172,79 +278,207 @@ describe('spawnGate', () => {
     for (let i = 0; i < 2_000; i += 1) {
       const [next, gate] = spawnGate(rng, i, 0, null)
       rng = next
-      lowest = Math.min(lowest, gate.gapY)
-      highest = Math.max(highest, gate.gapY + gate.gapHeight)
+      lowest = Math.min(lowest, gapCentre(gate))
+      highest = Math.max(highest, gapCentre(gate))
     }
-    expect(lowest).toBeGreaterThanOrEqual(GAP_Y_MIN)
-    expect(lowest).toBeLessThan(GAP_Y_MIN + 10)
-    expect(highest).toBeLessThanOrEqual(GAP_Y_MAX_EDGE)
-    expect(highest).toBeGreaterThan(GAP_Y_MAX_EDGE - 10)
+    const h = gapHeight(0)
+    const outset = thermalOutset(0)
+    expect(lowest).toBeGreaterThanOrEqual(minCentre(h, outset) - 1e-9)
+    expect(lowest).toBeLessThan(minCentre(h, outset) + 10)
+    expect(highest).toBeLessThanOrEqual(maxCentre(h, outset) + 1e-9)
+    expect(highest).toBeGreaterThan(maxCentre(h, outset) - 10)
   })
 })
 
-describe(`the fairness rule holds over ${SEEDS.toLocaleString('en-US')} seeds`, () => {
-  it('never places a course that cannot be flown, and never one off the field', () => {
-    let worstDeltaRatio = 0
-    let worstThermalClearance = Infinity
-    let tightestGapMargin = Infinity
-
-    for (let seed = 0; seed < SEEDS; seed += 1) {
-      const gates = course(seed, GATES_PER_SEED)
-
-      let previousCentre = KITE_START_Y
-      for (const { gate, elapsed } of gates) {
-        const centre = gapCentre(gate)
-        const gapBottom = gate.gapY + gate.gapHeight
-
-        // 1. Reachable from the gate before it (and the first from the kite's
-        //    starting altitude) within the time the player actually gets.
-        const limit = maxCentreDelta(spawnInterval(elapsed))
-        const delta = Math.abs(centre - previousCentre)
-        if (delta / limit > worstDeltaRatio) worstDeltaRatio = delta / limit
-        if (delta > limit + 1e-9) {
-          throw new Error(
-            `seed ${seed}, gate ${gate.id}: centre moved ${delta.toFixed(2)}px in ` +
-              `${spawnInterval(elapsed).toFixed(3)}s, limit ${limit.toFixed(2)}px`,
-          )
+describe('the side and centre rule', () => {
+  /**
+   * Half the gates are tight (a flat approach and an expensive ring) and half
+   * swing (a big course move and a cheap one). That 50/50 is by construction —
+   * the direction is a fair coin — and it is a better rhythm than v1's uniform
+   * draw produced. Checked here rather than left as a claim in the spec.
+   */
+  it('splits gates evenly between moving toward the ring and away from it', () => {
+    let toward = 0
+    let total = 0
+    for (let seed = 0; seed < 300; seed += 1) {
+      let previous = KITE_START_Y
+      for (const { gate } of course(seed, 60)) {
+        const u = gate.thermal.y > gapCentre(gate) ? 1 : -1
+        const delta = gapCentre(gate) - previous
+        // Clamping at the band edges turns some moves into exact zeroes, which
+        // belong to neither side; count only the ones that actually moved.
+        if (Math.abs(delta) > 1e-9) {
+          total += 1
+          if (delta * u > 0) toward += 1
         }
-
-        // 2. The whole gap is inside the legal band.
-        if (gate.gapY < GAP_Y_MIN - 1e-9 || gapBottom > GAP_Y_MAX_EDGE + 1e-9) {
-          throw new Error(
-            `seed ${seed}, gate ${gate.id}: gap [${gate.gapY.toFixed(2)}, ` +
-              `${gapBottom.toFixed(2)}] escapes [${GAP_Y_MIN}, ${GAP_Y_MAX_EDGE}]`,
-          )
-        }
-        tightestGapMargin = Math.min(
-          tightestGapMargin,
-          gate.gapY - GAP_Y_MIN,
-          GAP_Y_MAX_EDGE - gapBottom,
-        )
-
-        // 3. The thermal ring is strictly inside the gap — reachable without
-        //    having to clip a column to touch it.
-        const clearance = Math.min(
-          gate.thermal.y - gate.thermal.radius - gate.gapY,
-          gapBottom - (gate.thermal.y + gate.thermal.radius),
-        )
-        if (clearance <= 0) {
-          throw new Error(
-            `seed ${seed}, gate ${gate.id}: thermal at ${gate.thermal.y.toFixed(2)} is not ` +
-              `inside gap [${gate.gapY.toFixed(2)}, ${gapBottom.toFixed(2)}]`,
-          )
-        }
-        worstThermalClearance = Math.min(worstThermalClearance, clearance)
-
-        previousCentre = centre
+        previous = gapCentre(gate)
       }
     }
-
-    // Sanity on the test itself: if the generator had collapsed to the middle of
-    // the field, every assertion above would pass vacuously.
-    expect(worstDeltaRatio).toBeGreaterThan(0.9)
-    expect(worstDeltaRatio).toBeLessThanOrEqual(1)
-    expect(tightestGapMargin).toBeLessThan(1)
-    // 45 px inset minus the 22 px ring: 23 px of clearance at the tightest gap.
-    expect(worstThermalClearance).toBeCloseTo(THERMAL_RADIUS + 1, 9)
+    expect(total).toBeGreaterThan(10_000)
+    expect(toward / total).toBeGreaterThan(0.45)
+    expect(toward / total).toBeLessThan(0.55)
   })
+})
+
+describe(`the invariants hold over ${SEEDS.toLocaleString('en-US')} seeds`, () => {
+  // 3.5M gates of real arithmetic. Measured at ~6 s; the budget is generous so
+  // that a slower CI runner fails on an assertion rather than on a stopwatch.
+  it(
+    'never places a course that cannot be flown, and never one that is free',
+    { timeout: 60_000 },
+    () => {
+      let worstDeltaRatio = 0
+      let worstTowardRatio = 0
+      let tightestGapMargin = Infinity
+      let worstOutsideGap = Infinity
+      let worstCentreLineMiss = Infinity
+      let worstColumnClearance = Infinity
+      let worstNeighbourClearance = Infinity
+      let worstFieldMargin = Infinity
+      let gatesChecked = 0
+
+      for (let seed = 0; seed < SEEDS; seed += 1) {
+        const gates = course(seed, SECONDS_PER_SEED)
+
+        let previousCentre = KITE_START_Y
+        let previousSpawn: number | null = null
+        for (const { gate, elapsed } of gates) {
+          gatesChecked += 1
+          const centre = gapCentre(gate)
+          const gapBottom = gate.gapY + gate.gapHeight
+          const u = gate.thermal.y > centre ? 1 : -1
+          const offset = Math.abs(gate.thermal.y - centre)
+
+          // 1. Reachable from the gate before it (and the first from the kite's
+          //    starting altitude) within the time the player actually gets.
+          const limit = maxCentreDelta(spawnInterval(elapsed))
+          const delta = centre - previousCentre
+          worstDeltaRatio = Math.max(worstDeltaRatio, Math.abs(delta) / limit)
+          if (Math.abs(delta) > limit + 1e-9) {
+            throw new Error(
+              `seed ${seed}, gate ${gate.id}: centre moved ${Math.abs(delta).toFixed(2)}px in ` +
+                `${spawnInterval(elapsed).toFixed(3)}s, limit ${limit.toFixed(2)}px`,
+            )
+          }
+
+          // 2. The side/centre rule: the course may run away from the ring freely,
+          //    but may close on it by at most 30·(1 - q). Otherwise both bills —
+          //    the course move and the detour — come due on the same gate and the
+          //    ring stops being takeable at any survivable clearance.
+          const towardCap = Math.min(limit, thermalTowardDelta(elapsed))
+          if (delta * u > towardCap + 1e-9) {
+            throw new Error(
+              `seed ${seed}, gate ${gate.id}: centre closed ${(delta * u).toFixed(2)}px on the ` +
+                `ring's side at t=${elapsed.toFixed(1)}s, cap ${towardCap.toFixed(2)}px`,
+            )
+          }
+          worstTowardRatio = Math.max(worstTowardRatio, (delta * u) / towardCap)
+
+          // 3. The whole gap is inside the legal band.
+          if (gate.gapY < GAP_Y_MIN - 1e-9 || gapBottom > GAP_Y_MAX_EDGE + 1e-9) {
+            throw new Error(
+              `seed ${seed}, gate ${gate.id}: gap [${gate.gapY.toFixed(2)}, ` +
+                `${gapBottom.toFixed(2)}] escapes [${GAP_Y_MIN}, ${GAP_Y_MAX_EDGE}]`,
+            )
+          }
+          tightestGapMargin = Math.min(
+            tightestGapMargin,
+            gate.gapY - GAP_Y_MIN,
+            GAP_Y_MAX_EDGE - gapBottom,
+          )
+
+          // 4. THE REPLACEMENT INVARIANT. The ring's disc lies entirely outside
+          //    the gap band — equivalently, a kite that collects is at that
+          //    instant at least h/2 - KITE_RADIUS from the gap centre, i.e. it has
+          //    left the safe corridor completely. This is the exact mirror of the
+          //    v1 proof that killed the old placement.
+          const outsideBy = offset - gate.gapHeight / 2 - THERMAL_RADIUS
+          if (outsideBy < -1e-9) {
+            throw new Error(
+              `seed ${seed}, gate ${gate.id}: ring at ${gate.thermal.y.toFixed(2)} overlaps gap ` +
+                `[${gate.gapY.toFixed(2)}, ${gapBottom.toFixed(2)}]`,
+            )
+          }
+          worstOutsideGap = Math.min(worstOutsideGap, outsideBy)
+
+          // 5. The direct regression test for the v1 defect: the gap's centre line
+          //    never collects, at any t. Under v1 this failed on 65% of gates and
+          //    on 100% of them from t = 77 s.
+          const centreLineMiss = offset - COLLECT_REACH
+          if (centreLineMiss <= 0) {
+            throw new Error(
+              `seed ${seed}, gate ${gate.id}: the gap centre line collects the ring for free ` +
+                `at t=${elapsed.toFixed(1)}s`,
+            )
+          }
+          worstCentreLineMiss = Math.min(worstCentreLineMiss, centreLineMiss)
+
+          // 6. The ring's disc is 7 px clear of both of its own gate's columns,
+          //    and clear of the previous gate's columns too — it sits in genuine
+          //    open air, not tucked against a hazard.
+          const ringX = thermalX(gate)
+          worstColumnClearance = Math.min(worstColumnClearance, gate.x - (ringX + THERMAL_RADIUS))
+          if (previousSpawn !== null) {
+            // Where the previous gate has scrolled to by the time this one is
+            // created. Scroll speed only rises, so taking it at the earlier of the
+            // two times understates the distance — the clearance below is a lower
+            // bound on the real one, which is the direction a safety check should
+            // err in.
+            const spacing = scrollSpeed(previousSpawn) * (elapsed - previousSpawn)
+            const previousRightEdge = GATE_SPAWN_X - spacing + GATE_WIDTH
+            worstNeighbourClearance = Math.min(
+              worstNeighbourClearance,
+              ringX - THERMAL_RADIUS - previousRightEdge,
+            )
+          }
+          previousSpawn = elapsed
+
+          // 7. The whole ring is reachable and visible: its centre stays inside
+          //    the kite's flyable band, inset by the radius and a 20 px margin.
+          if (gate.thermal.y < THERMAL_Y_MIN - 1e-9 || gate.thermal.y > THERMAL_Y_MAX + 1e-9) {
+            throw new Error(
+              `seed ${seed}, gate ${gate.id}: ring centre ${gate.thermal.y.toFixed(2)} escapes ` +
+                `[${THERMAL_Y_MIN}, ${THERMAL_Y_MAX}]`,
+            )
+          }
+          worstFieldMargin = Math.min(
+            worstFieldMargin,
+            gate.thermal.y - THERMAL_Y_MIN,
+            THERMAL_Y_MAX - gate.thermal.y,
+          )
+
+          previousCentre = centre
+        }
+      }
+
+      // Every seed really did fly the whole ramp and out the far side.
+      expect(gatesChecked / SEEDS).toBeGreaterThan(340)
+
+      // Sanity on the test itself: if the generator had collapsed to the middle of
+      // the field, every assertion above would pass vacuously.
+      expect(worstDeltaRatio).toBeGreaterThan(0.9)
+      expect(worstDeltaRatio).toBeLessThanOrEqual(1)
+      expect(worstTowardRatio).toBeGreaterThan(0.9)
+      expect(worstTowardRatio).toBeLessThanOrEqual(1)
+      // The ring's field bound is the one that actually binds, so it is the one
+      // that has to reach zero for this test not to be vacuous. The gap's own
+      // margin bottoms out at the 14 px of slack between the two bounds, which is
+      // a derived consequence rather than a tuning choice — see the band tests.
+      expect(worstFieldMargin).toBeLessThan(1)
+      expect(tightestGapMargin).toBeCloseTo(14, 6)
+
+      // And the headline numbers, pinned so a retune that erodes them is visible.
+      // At the outset floor the ring's disc is exactly flush with the gap band:
+      // zero is the tightest this is allowed to be, and it is where the invariant
+      // and the constant meet.
+      expect(worstOutsideGap).toBeCloseTo(0, 6)
+      // The centre line misses by at least E - 38 + h/2 — 17 px at the asymptote.
+      expect(worstCentreLineMiss).toBeGreaterThan(16)
+      // 64 - 22 - 35 = 7 px from its own columns, always, at every difficulty.
+      expect(worstColumnClearance).toBeCloseTo(7, 9)
+      // And at least 167 px from the previous gate's, which is the gate spacing at
+      // its tightest (288 px at t = 0) less the 121 px the geometry needs.
+      expect(worstNeighbourClearance).toBeGreaterThan(167)
+    },
+  )
 })

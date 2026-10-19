@@ -17,13 +17,14 @@
  *
  * Two disciplines this file learned the hard way, in the GOK-14 review:
  *
- *   - **Durations here are censored.** The ramp freezes at 90s, so a player who
- *     is alive then is alive forever and MAX_SECONDS is the only thing making
- *     their run finite. At the competent operating point every single run is
- *     censored, which makes any difference of means exactly zero by
- *     construction. Anything comparing two strategies is therefore reported as a
+ *   - **Durations can still be censored, and censoring is still reported.** Under
+ *     v1 the ramp froze at 90s, so a player alive then was alive forever and
+ *     MAX_SECONDS was the only thing making a run finite — which made any
+ *     difference of means exactly zero by construction. v2's ramp has no top, so
+ *     a censored run now means something has gone wrong with the difficulty
+ *     curve rather than with the harness. Comparisons are still reported as a
  *     rate per unit of exposure — deaths per 100 gates — which censoring does not
- *     touch, with durations kept only as a description of the profile.
+ *     touch, with durations kept as a description of the profile.
  *   - **A knob that is a step function gets reported as a step**, not sampled at
  *     one point and quoted as if it were a measurement. See the opportunist.
  *
@@ -32,17 +33,21 @@
  */
 
 import { latencyFrames, playRun, type PlayerProfile, type RunResult } from './autopilot.js'
-import {
-  bestAchievableCost,
-  costAcrossTheRamp,
-  opportunistKnee,
-  sampleCourse,
-  searchForRiskyPlacement,
-} from './geometry.js'
+import { centreLineMissAcrossTheRamp, sampleCourse, searchForFreeCollect } from './geometry.js'
+import { formatCostTable } from './cost.js'
 
 const SEEDS = Array.from({ length: 200 }, (_, i) => 1000 + i * 7)
-/** Runs are cut off here; the difficulty ramp has been frozen for 2.5x this long by then. */
-const MAX_SECONDS = 240
+/**
+ * The ceiling a run is allowed to reach, not a cutoff it is expected to.
+ *
+ * v1 cut runs off at 240 s, which was the harness rather than the game — and
+ * once the course froze at 90 s it became the only thing making any duration
+ * finite, so every number computed from a duration was really a number about the
+ * cutoff (GOK-14). Spec v2 deletes it: the course now keeps tightening forever,
+ * so a run ends because the course got you, and 600 s is here only to bound the
+ * report's own runtime. **A run that reaches it is a finding, not a data point.**
+ */
+const MAX_SECONDS = 600
 /** Whole input-to-pixel chain for a typical mid-range phone, not reaction time. */
 const LATENCY = 0.083
 
@@ -68,8 +73,6 @@ const COMPETENT = {
 /** The same hands, playing badly: barely leading the kite, reading it poorly. */
 const RUSTY = { ...COMPETENT, unanticipatedFrames: 3, perception: 28, aimJitter: 18 } as const
 
-const KNEE = opportunistKnee()
-
 const PROFILES: ReadonlyArray<readonly [string, PlayerProfile]> = [
   ['safe / expert', { ...COMPETENT, strategy: 'safe', unanticipatedFrames: 0, perception: 0 }],
   ['safe / competent', { ...COMPETENT, strategy: 'safe' }],
@@ -82,15 +85,16 @@ const PROFILES: ReadonlyArray<readonly [string, PlayerProfile]> = [
   ['collector / rusty', { ...RUSTY, strategy: 'collector' }],
   ['greedy / competent', { ...COMPETENT, strategy: 'greedy' }],
   ['greedy / rusty', { ...RUSTY, strategy: 'greedy' }],
-  // Both sides of the knee, because one side of it is all there is to say.
-  [
-    `opportunist <=${KNEE.floor.toFixed(0)}px`,
-    { ...COMPETENT, strategy: 'opportunist', riskTolerance: KNEE.floor },
-  ],
-  [
-    `opportunist >${KNEE.ceiling.toFixed(0)}px`,
-    { ...COMPETENT, strategy: 'opportunist', riskTolerance: KNEE.ceiling + 1 },
-  ],
+  // Three points on a dial, not two sides of a step. Under v1 the clearance
+  // left by the cheapest collecting line was a constant, so the opportunist was
+  // a step function of its own tolerance and quoting a number from it quoted an
+  // identity (GOK-14). In v2 affordability depends on the gap height and the
+  // scroll speed, both of which move continuously, so this axis means
+  // something — and these three rows are what it means.
+  ['opportunist / 16px', { ...COMPETENT, strategy: 'opportunist', riskTolerance: 16 }],
+  ['opportunist / 19px', { ...COMPETENT, strategy: 'opportunist', riskTolerance: 19 }],
+  ['opportunist / 20px', { ...COMPETENT, strategy: 'opportunist', riskTolerance: 20 }],
+  ['opportunist / 24px', { ...COMPETENT, strategy: 'opportunist', riskTolerance: 24 }],
 ]
 
 function quantile(sorted: readonly number[], q: number): number {
@@ -163,7 +167,7 @@ function rateTable(labels: readonly string[], at: (label: string) => readonly Ru
 }
 
 function deathHistogram(results: readonly RunResult[]): void {
-  const buckets = [0, 15, 30, 45, 60, 90, 120, 180, MAX_SECONDS]
+  const buckets = [0, 15, 30, 45, 60, 90, 120, 180, 240, 300, MAX_SECONDS]
   const crashes = results.filter((r) => r.crashCause !== null)
   const counts = buckets.slice(0, -1).map((low, i) => {
     const high = buckets[i + 1] as number
@@ -179,11 +183,14 @@ function deathHistogram(results: readonly RunResult[]): void {
   })
   const column = crashes.filter((r) => r.crashCause === 'column').length
   console.log(`  cause: column ${column}, ground ${crashes.length - column}`)
-  console.log(`  survived the ${MAX_SECONDS}s cutoff: ${results.length - crashes.length}`)
+  console.log(
+    `  still alive at ${MAX_SECONDS}s (spec v2 says none should be): ` +
+      `${results.length - crashes.length}`,
+  )
 }
 
 console.log(
-  `UPDRAFT feel report — ${SEEDS.length} seeds, cutoff ${MAX_SECONDS}s, ` +
+  `UPDRAFT feel report — ${SEEDS.length} seeds, ceiling ${MAX_SECONDS}s, ` +
     `${(LATENCY * 1000).toFixed(0)} ms latency (${latencyFrames(LATENCY)} frames in flight)\n`,
 )
 
@@ -196,7 +203,9 @@ for (const [label, profile] of PROFILES) {
 
 const at = (label: string): readonly RunResult[] => byLabel.get(label) ?? []
 
-console.log('\nDurations above are censored at the cutoff — compare profiles on this instead:\n')
+console.log(
+  '\nDurations above may be censored at the ceiling — compare profiles on this instead:\n',
+)
 rateTable(
   PROFILES.map(([label]) => label),
   at,
@@ -207,13 +216,11 @@ deathHistogram(at('collector / competent'))
 
 console.log('\nRisk/reward — is a thermal a decision or a formality?')
 console.log(
-  `  The cheapest line that still collects always leaves the same clearance:\n` +
-    `  ${KNEE.ceiling.toFixed(0)}px while the gap is wider than ${KNEE.tightensBelowGap.toFixed(0)}px, falling to ` +
-    `${KNEE.floor.toFixed(0)}px at maximum difficulty.\n` +
-    `  So a player who declines rings below some nerve is a step function, not a dial:\n` +
-    `  every tolerance <=${KNEE.floor.toFixed(0)}px takes every ring, every tolerance >${KNEE.ceiling.toFixed(0)}px declines every\n` +
-    `  ring, and the two rows above are those two behaviours. There is no setting at which\n` +
-    `  a thermal is a judgement call.`,
+  `  The three opportunist rows above are the answer. Collecting is a detour outside the\n` +
+    `  safe corridor and back, so how much of it a player takes depends on how much margin\n` +
+    `  they insist on keeping — which is a dial, and the rows show it moving. Under v1 this\n` +
+    `  was a step function and any number quoted from it was an identity rather than a\n` +
+    `  measurement.`,
 )
 
 const safe = at('safe / competent')
@@ -246,27 +253,24 @@ console.log(
 )
 
 console.log('\nCourse geometry — no autopilot involved:')
-console.log(costAcrossTheRamp())
+console.log(centreLineMissAcrossTheRamp())
 
-const course = SEEDS.slice(0, 50).flatMap((seed) => sampleCourse(seed, 180))
-const free = course.filter((g) => g.marginCost <= 0).length
+const course = SEEDS.slice(0, 50).flatMap((seed) => sampleCourse(seed, 240))
+const free = course.filter((g) => g.freeCollect > 1e-9).length
 console.log(
-  `\n  Over ${course.length} spawned gates: the gap's own centre line already collects the ring on\n` +
-    `  ${pct(free, course.length)} of them, and the average margin given up across all of them is ` +
-    `${mean(course.map((g) => g.marginCost)).toFixed(1)}px\n  out of ${mean(course.map((g) => g.clearanceOnCentre)).toFixed(1)}px available.`,
+  `\n  Over ${course.length} spawned gates: the gap's own centre line collects the ring on\n` +
+    `  ${pct(free, course.length)} of them (it was 65% under v1, and 100% past t=77s), and the\n` +
+    `  average excursion a collector has to make outside the safe band is ` +
+    `${mean(course.map((g) => g.excursion)).toFixed(1)}px\n  against ${mean(course.map((g) => g.clearanceOnCentre)).toFixed(1)}px of margin on the centre line.`,
 )
 
-const search = searchForRiskyPlacement()
+const search = searchForFreeCollect()
 console.log(
-  `\n  Can retuning fix it? Swept ${search.tested.toLocaleString()} (gap, ring radius, position) combinations:\n` +
-    `  ${search.risky} admit a ring that cannot be collected from a surviving altitude at all.`,
+  `\n  Is it fixable by retuning, in either direction? Swept ${search.tested.toLocaleString()} (gap, ring\n` +
+    `  radius, outset) combinations with the outset at or above the radius:\n` +
+    `  ${search.free} admit a surviving altitude that also collects. The tightest case in the sweep\n` +
+    `  leaves ${search.tightest.toFixed(0)}px — a touch at the E = THERMAL_RADIUS boundary, which is the invariant.`,
 )
-const achievable = bestAchievableCost()
-console.log(
-  `  Relaxing that to merely *expensive*, at the ${achievable.gap.toFixed(0)}px endgame gap ` +
-    `(${achievable.marginOnCentre.toFixed(0)}px of margin on the centre line):\n` +
-    `    keeping THERMAL_RADIUS at ${22}: best cost ${achievable.atCurrentRadius.cost.toFixed(0)}px, ` +
-    `at inset ${achievable.atCurrentRadius.inset} (ring ${achievable.atCurrentRadius.ringToColumn}px off the column)\n` +
-    `    free to shrink the ring: best cost ${achievable.best.cost.toFixed(0)}px, at radius ` +
-    `${achievable.best.radius} / inset ${achievable.best.inset} (ring ${achievable.best.ringToColumn}px off the column)`,
-)
+
+console.log('\nWhat a ring costs — the reference model of spec §2.2:')
+console.log(formatCostTable())

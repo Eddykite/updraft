@@ -2,7 +2,7 @@
   "name": "updraft",
   "version": "0.1.0",
   "private": true,
-  "description": "UPDRAFT — a one-button kite-flying arcade game. Zero runtime dependencies.",
+  "description": "UPDRAFT \u2014 a one-button kite-flying arcade game. Zero runtime dependencies.",
   "type": "module",
   "packageManager": "pnpm@12.14.0",
   "engines": {
@@ -24,7 +24,9 @@
     "e2e": "playwright test",
     "feel": "node scripts/run-tool.mjs tools/feel/report.ts",
     "feel:sweep": "node scripts/run-tool.mjs tools/feel/sensitivity.ts",
-    "verify": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test:coverage && pnpm build && pnpm budget"
+    "verify": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test:coverage && pnpm build && pnpm budget",
+    "feel:tape": "node scripts/run-tool.mjs tools/feel/tape-search.ts",
+    "feel:golden": "node scripts/run-tool.mjs tools/feel/record-golden.ts"
   },
   "dependencies": {},
   "devDependencies": {

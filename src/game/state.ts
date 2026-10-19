@@ -46,10 +46,12 @@ export interface Kite {
 }
 
 /**
- * The updraft ring inside a gate's gap.
+ * The updraft ring that leads a gate, sitting *outside* its gap (spec §2.2).
  *
- * It has no x of its own: it rides at the gate's horizontal centre
- * (`gate.x + GATE_WIDTH / 2`). `y` is absolute in field coordinates.
+ * It has no x of its own: it rides THERMAL_LEAD ahead of the column centre line,
+ * at `collision.thermalX(gate)` = `gate.x - 29`, so the kite meets it before the
+ * columns. `y` is absolute in field coordinates and is at least THERMAL_RADIUS
+ * clear of the gap band, on the side the spawner drew.
  */
 export interface Thermal {
   readonly y: number
@@ -82,7 +84,16 @@ export type GameEvent =
   | { readonly type: 'run_started' }
   | { readonly type: 'gate_passed'; readonly gateId: number; readonly points: number }
   | { readonly type: 'thermal_collected'; readonly gateId: number; readonly points: number }
-  | { readonly type: 'streak_reset'; readonly gateId: number }
+  /**
+   * A gate went by with its ring untaken: the streak steps down by
+   * STREAK_MISS_PENALTY, floored at 0. `streak` is the value *after* the step,
+   * so the shell never has to recompute the rule to show it.
+   *
+   * Named for what it now is. v1's `streak_reset` was accurate when a miss cost
+   * you everything; under the step-down rule a reset is only the special case
+   * where the streak was already below 2.
+   */
+  | { readonly type: 'streak_dropped'; readonly gateId: number; readonly streak: number }
   | { readonly type: 'multiplier_up'; readonly multiplier: number }
   | { readonly type: 'crashed'; readonly cause: CrashCause; readonly score: number }
 
@@ -106,7 +117,12 @@ export interface GameState {
   /** Total logical px the world has scrolled in this run. */
   readonly distance: number
   readonly score: number
-  /** Consecutive gates whose thermal was collected. Resets to 0 on a miss. */
+  /**
+   * Collecting credit, in [0, STREAK_MAX]. +1 per ring taken, -2 per gate passed
+   * without one. Not a run of consecutive collects any more — it is a running
+   * balance, which is what makes the multiplier mean "you are taking more than
+   * two thirds of the rings" rather than "you have not missed one yet".
+   */
   readonly streak: number
   /** Derived: min(1 + floor(streak / 2), 5). Stored so the renderer need not recompute. */
   readonly multiplier: number

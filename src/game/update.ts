@@ -29,7 +29,14 @@
  * still deterministic end to end while no two runs are the same course.
  */
 
-import { GATE_WIDTH, KITE_RADIUS, KITE_START_Y, KITE_X } from './constants.js'
+import {
+  GATE_WIDTH,
+  KITE_RADIUS,
+  KITE_START_Y,
+  KITE_X,
+  STREAK_MAX,
+  STREAK_MISS_PENALTY,
+} from './constants.js'
 import { hitsGateColumns, touchesThermal } from './collision.js'
 import { scrollSpeed, spawnInterval } from './difficulty.js'
 import { hasHitGround, integrate } from './physics.js'
@@ -117,7 +124,7 @@ function stepPlaying(state: GameState, input: InputState, dt: number): GameState
       events.push({ type: 'thermal_collected', gateId: gate.id, points })
       gate = { ...gate, thermal: { ...gate.thermal, collected: true } }
 
-      streak += 1
+      streak = Math.min(streak + 1, STREAK_MAX)
       const stepped = multiplierFor(streak)
       if (stepped !== multiplier) {
         multiplier = stepped
@@ -133,9 +140,12 @@ function stepPlaying(state: GameState, input: InputState, dt: number): GameState
       events.push({ type: 'gate_passed', gateId: gate.id, points })
 
       if (!gate.thermal.collected) {
-        streak = 0
+        // One multiplier step down, not the whole ladder. The gate itself still
+        // pays at the rate you arrived with; the step-down lands after it, the
+        // same way a collect is paid before its step up.
+        streak = Math.max(0, streak - STREAK_MISS_PENALTY)
         multiplier = multiplierFor(streak)
-        events.push({ type: 'streak_reset', gateId: gate.id })
+        events.push({ type: 'streak_dropped', gateId: gate.id, streak })
       }
       gate = { ...gate, passed: true }
     }

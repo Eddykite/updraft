@@ -24,7 +24,9 @@ import {
   KITE_START_Y,
   KITE_X,
   NET_LIFT_ACCEL,
+  VY_CLAMP,
 } from '../../src/game/constants.js'
+import { scrollSpeed } from '../../src/game/difficulty.js'
 import { integrate } from '../../src/game/physics.js'
 import { createRng, nextRange, type Rng } from '../../src/game/rng.js'
 import { gapCentre } from '../../src/game/spawner.js'
@@ -33,23 +35,37 @@ import { createInitialState, type Gate, type GameState, type Kite } from '../../
 
 /** How the model player chooses what altitude to aim for. */
 export type Strategy =
-  /** Fly gap centres. Never aims at a thermal — though see `collector` on why it may still get some. */
+  /**
+   * Fly gap centres, always. In v2 this collects **exactly zero** rings, and
+   * that is a theorem rather than a tendency: the ring sits `h/2 + E` from the
+   * gap centre with `E >= THERMAL_RADIUS`, so the centre line misses the collect
+   * disc at every gap height and every difficulty. In v1 the same strategy took
+   * 59% of the rings, which is why `collector` minus `safe` measured nothing.
+   */
   | 'safe'
-  /** Aim at the ring's centre, every time. A naive player: maximum commitment, maximum exposure. */
+  /**
+   * Commit to the ring's own altitude and hold it until the ring is taken. A
+   * naive player: maximum commitment, maximum exposure, and in v2 usually fatal,
+   * because the ring's altitude is lethal 29 px later.
+   */
   | 'greedy'
   /**
-   * Take every ring, but on the cheapest line that still touches it — the point
-   * of the collect band nearest the gap centre.
+   * Take every ring it can afford, by flying the **detour**: dive out to the
+   * shallowest altitude that still touches the ring, turn back as late as the
+   * physics allow, and be inside the gap again before the columns arrive.
    *
-   * This is what a competent player actually does, and it is the profile that
-   * isolates the true price of a thermal: `collector` minus `safe` is the cost
-   * of the reward, with strategy held constant everywhere else.
+   * This is the shape of play the spec's reference model prices, and it is a
+   * genuinely different manoeuvre from v1's version of this profile, which was
+   * an aiming tweak — the ring used to be inside the gap, so "collecting" was
+   * just picking a legal altitude and holding it. Here it is a trip outside the
+   * safe corridor and back, and `collector` minus `safe` is what that trip
+   * costs with everything else held constant.
    */
   | 'collector'
   /**
-   * Take a ring only when the cheapest collecting line still leaves at least
-   * `riskTolerance` px of clearance. Declines the ones that cost more than the
-   * player's own error budget.
+   * Take a ring only when the detour is affordable with at least
+   * `riskTolerance` px of clearance to spare. Declines the ones that cost more
+   * than the player's own error budget.
    */
   | 'opportunist'
 
@@ -162,49 +178,125 @@ function targetGate(state: GameState): Gate | undefined {
 }
 
 /**
+ * Execution slack the model collector keeps in hand, in px.
+ *
+ * `offsetAfterTurningBack` is continuous maths; the controller is a bang-bang
+ * loop running at 60 Hz that cannot reverse instantaneously, so a collector that
+ * turns back at the exact moment the arithmetic allows arrives a frame late and
+ * dies. This is the gap between the two, and it is **measured, not assumed**:
+ * swept over the five reference seeds to 150 s, a frame-perfect collector dies
+ * on every seed at 9 px of slack, on two of five at 12, and on none at 16.
+ *
+ * It is a property of this instrument, not of the game — nothing in src/game
+ * knows about it, and it must not be read as a gameplay constant. That it comes
+ * out equal to KITE_RADIUS is a coincidence of scale, not a derivation.
+ */
+const COLLECTOR_SLACK = 16
+
+/**
+ * Where the kite ends up `seconds` from now if it turns back right now and pulls
+ * as hard as it can, measured as an offset from the gap centre toward the ring.
+ *
+ * Exact rather than conservative, including the speed clamp, because the whole
+ * profile is the timing of this one decision: a model player that turns back too
+ * early declines affordable rings and under-reports the layer, and one that
+ * turns back too late flies into a column and makes every survival number in the
+ * report a measurement of the controller instead of the game.
+ */
+function offsetAfterTurningBack(
+  offset: number,
+  outwardVelocity: number,
+  seconds: number,
+  inward: number,
+): number {
+  if (seconds <= 0) return offset
+  // Phase 1: decelerate the dive and accelerate back, until the clamp.
+  const toClamp = (outwardVelocity + VY_CLAMP) / inward
+  const s1 = Math.min(seconds, Math.max(0, toClamp))
+  let y = offset + outwardVelocity * s1 - 0.5 * inward * s1 * s1
+  // Phase 2: hold the clamp.
+  if (seconds > s1) y -= VY_CLAMP * (seconds - s1)
+  return y
+}
+
+/**
  * Altitude the player is aiming for.
  *
- * `collector` is the interesting one: it takes every ring on the *cheapest* line
- * that touches it rather than aiming at the ring's centre, which is what a
- * competent player does and what makes `collector` minus `safe` a clean read on
- * what a thermal actually costs.
+ * `collector` is the interesting one, and in v2 it is a **detour** rather than a
+ * choice of line: the ring sits outside the gap, so there is no legal altitude
+ * through the gate that also touches it. The profile is therefore a dive and a
+ * recovery, and the only decision in it is *when to turn back*.
  *
- * `opportunist` then declines the rings whose cheapest line is still tighter
- * than their nerve. If the opportunist ends up collecting nearly all of them,
- * the "risk" in the risk/reward layer is not real.
+ * It commits to the ring's own altitude and holds that commitment until the
+ * physics say one more frame of diving would cost it the gate — then it aims at
+ * the gap centre and pulls. Because it is still moving outward when it turns, it
+ * coasts on past the turn and takes the ring on the way through, which is the
+ * same shape of line the reference model in cost.ts prices.
+ *
+ * It decides on the **led** kite rather than the raw one — where the kite is
+ * going once the inputs already in flight have landed, not where it is now.
+ * That is not a refinement: judging the turn on the raw state makes the whole
+ * profile a cliff, because at 83 ms of latency the kite dives for five more
+ * frames after the decision and arrives 40-odd px deeper than the arithmetic
+ * assumed. Measured, before the fix was made: a frame-perfect collector survived
+ * 120 s and a competent one died at a median of 4 s. A difference that large
+ * between two adjacent points on the latency axis is the signature of a
+ * controller sitting on its own stability edge, not of an unfair game.
+ *
+ * The timing has to be computed rather than guessed. Turning back when the ring
+ * is *taken* is far too late: at t = 0 the ring is 206 px from the gap centre
+ * and the columns arrive 29 px of world travel later, which is 161 ms — not
+ * enough to recover from the ring's altitude at any acceleration the kite has.
+ *
+ * (v1's version of this function deliberately did *not* retarget on collect,
+ * because the ring was inside the gap and flinching toward the centre mid-gate
+ * killed the thermal profiles. That reasoning is now inverted: the ring is
+ * outside the gap, the kite is not between the columns when it takes it, and
+ * hauling back in immediately is not a flinch but the manoeuvre.)
  */
-function aimFor(state: GameState, profile: PlayerProfile): number {
+function aimFor(state: GameState, profile: PlayerProfile, led: Kite): number {
   const gate = targetGate(state)
   if (gate === undefined) return KITE_START_Y
 
   const centre = gapCentre(gate)
   if (profile.strategy === 'safe') return centre
-
-  // Note the absence of a `gate.thermal.collected` test. An earlier version
-  // retargeted to the gap centre the instant the ring was taken, which put a
-  // step change into the target *while the kite was between the columns* and
-  // killed the thermal-chasing profiles within 33 ms of latency. That was the
-  // controller, not the game. No player flinches toward the centre of a gap they
-  // are already inside, and they do not need to: the ring always sits inside the
-  // safe band, so its altitude is a legal line through the gate. Commit to the
-  // altitude and hold it until the gate is behind you.
+  // Taken already: the only thing left to fly is the gate.
+  if (gate.thermal.collected) return centre
+  // A naive player commits to the ring and never reconsiders. Usually fatal,
+  // which is the point of having the profile.
   if (profile.strategy === 'greedy') return gate.thermal.y
 
-  // The cheapest collecting line: clearance to the nearer column is maximised at
-  // the gap centre and falls off linearly either way, so the best altitude that
-  // still touches the ring is the point of the collect band nearest the centre.
-  const safeLow = gate.gapY + KITE_RADIUS
-  const safeHigh = gate.gapY + gate.gapHeight - KITE_RADIUS
-  if (safeLow > safeHigh) return centre
-  const reach = gate.thermal.radius + KITE_RADIUS
-  const nearest = Math.min(Math.max(centre, gate.thermal.y - reach), gate.thermal.y + reach)
-  const cheapest = Math.min(Math.max(nearest, safeLow), safeHigh)
+  const safeHalfWidth = gate.gapHeight / 2 - KITE_RADIUS
+  if (safeHalfWidth <= 0) return centre
 
-  if (profile.strategy === 'collector') return cheapest
+  // Offsets and velocities are measured toward the ring, so the two sides share
+  // one piece of arithmetic. Coming back is a climb when the ring is below and a
+  // fall when it is above, and those are not the same number.
+  const u = gate.thermal.y > centre ? 1 : -1
+  const offset = u * (led.y - centre)
+  const outward = u * led.vy
+  const inward = u > 0 ? NET_LIFT_ACCEL : GRAVITY
 
-  // opportunist: only if that line still leaves them room for their own error.
-  const clearance = Math.min(cheapest - safeLow, safeHigh - cheapest)
-  return clearance >= profile.riskTolerance ? cheapest : centre
+  // Seconds until the gap constraint bites — the moment the kite's rim reaches
+  // the column's leading edge — measured from where the *led* kite is, not from
+  // now. `led` is the kite once the inputs already in flight have landed, so the
+  // gate is `latency` closer by then; pairing a led altitude with a present-tense
+  // deadline overstates the time available by exactly the latency, and at 83 ms
+  // that is 15 px of dive the arithmetic never sees.
+  const seconds = Math.max(
+    0,
+    (gate.x - (KITE_X + KITE_RADIUS)) / scrollSpeed(state.elapsed) - profile.latency,
+  )
+
+  // An opportunist insists on keeping `riskTolerance` px in hand *on top of*
+  // the execution slack, which makes it turn back earlier and so take fewer
+  // rings. It needs no separate decision about whether a ring is worth it: a
+  // dive that cannot reach the collect disc within its own margin simply
+  // aborts, which is the same thing a player does.
+  const nerve = profile.strategy === 'opportunist' ? profile.riskTolerance : 0
+  const limit = safeHalfWidth - COLLECTOR_SLACK - nerve
+  if (offsetAfterTurningBack(offset, outward, seconds, inward) >= limit) return centre
+  return gate.thermal.y
 }
 
 /**
@@ -246,6 +338,24 @@ function lookAhead(kite: Kite, pending: readonly boolean[], unanticipatedFrames:
   return ahead
 }
 
+/**
+ * The controller's decision for one tick, with no latency queue and no noise.
+ *
+ * Exported so the golden-replay recorder drives the *same* controller the report
+ * does rather than a re-implementation of it: a recorder that quietly disagrees
+ * with the model player would freeze a run nobody can reproduce. At zero latency
+ * and zero noise the controller is a pure function of the state, which is what
+ * makes this equivalent to a step of `playRun` with such a profile.
+ */
+export function decideHolding(state: GameState, profile: PlayerProfile): boolean {
+  return wantsToClimb(
+    state.kite.y,
+    state.kite.vy,
+    aimFor(state, profile, state.kite),
+    profile.deadZone,
+  )
+}
+
 /** Frames of input queue a given latency produces. The resolution of the lead axis. */
 export function latencyFrames(latency: number): number {
   return Math.max(0, Math.round(latency / FIXED_DT))
@@ -285,8 +395,8 @@ export function playRun(seed: number, profile: PlayerProfile, maxSeconds = 300):
       jitter = draw(profile.aimJitter)
     }
 
-    const target = aimFor(state, profile) + jitter
     const led = lookAhead(state.kite, pending, profile.unanticipatedFrames)
+    const target = aimFor(state, profile, led) + jitter
     // The player reads their own altitude imperfectly; velocity is left clean,
     // since differentiating noise would model a sensor rather than a person.
     const decision = wantsToClimb(

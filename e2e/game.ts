@@ -72,7 +72,14 @@ export async function logicalPoint(
 
 /**
  * An input tape: milliseconds to hold, then to release, alternating, starting
- * held. Found by searching schedules against the real `step()` on DEFAULT_SEED.
+ * held. Found by searching schedules against the real `step()` on DEFAULT_SEED
+ * — see tools/feel/tape-search.ts, which is how it is re-derived.
+ *
+ * **Re-derived for spec v2.** The tape is a property of the course, so moving
+ * the gate spawn x, the ramp and the ring's placement invalidated the old one
+ * outright: it scored zero on a clean replay of the v2 course. That is the
+ * failure mode worth knowing about — nothing in the browser suite asserts the
+ * tape scores, so a rotten tape shows up only as quietly worse deploy evidence.
  *
  * It is a *best effort* at a scoring run, and nothing asserts that it scores.
  * That caveat is the whole design note, so it is worth the paragraph.
@@ -99,7 +106,7 @@ export async function logicalPoint(
  * does destroys a stored best. This tape just makes the game-over screenshot
  * show a game someone played, when the machine is quiet enough.
  */
-export const SCORING_TAPE = [513, 351, 551, 544, 482, 485, 442, 468, 325] as const
+export const SCORING_TAPE = [831, 389, 851, 498, 301, 536, 542, 516, 402] as const
 
 /**
  * Play the tape from the title screen, then let go and wait for the crash.
