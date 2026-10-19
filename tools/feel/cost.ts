@@ -213,12 +213,34 @@ export function worstGateTowardDelta(elapsed: number): number {
  * legal place to leave it is hugging its near edge, at
  * `-towardDelta + (gap/2 - KITE_RADIUS)`.
  *
- * **The one assumption: the kite leaves that edge settled, at vy = 0.** That is
- * not a convenience — it is the same assumption §2.3's own fairness bound is
- * built on. `maxCentreDelta = 0.5·reach(T)` is defined as the distance the kite
- * can cover *and settle within* T, i.e. at rest at both ends, so pricing the
- * approach from rest is pricing it against the same model that declared the
- * gate legal in the first place.
+ * ## Two assumptions about the exit, not one, and they pull opposite ways
+ *
+ * The leg has to start somewhere, which means choosing both a **position** and
+ * a **velocity** for the kite as it leaves the previous gap. Earlier versions
+ * of this comment argued only the velocity, which is the half that makes the
+ * gate look *harder*; the Engineering Lead caught that on GOK-25 and the
+ * omission was load-bearing. Both are stated here now.
+ *
+ * **Velocity: vy = 0, the conservative half.** That is not a convenience — it
+ * is the same assumption §2.3's own fairness bound is built on.
+ * `maxCentreDelta = 0.5·reach(T)` is defined as the distance the kite can cover
+ * *and settle within* T, i.e. at rest at both ends, so pricing the approach
+ * from rest is pricing it against the same model that declared the gate legal.
+ * A real collector can leave already moving outward, and every px/s of that
+ * moves the published figure **up** — see `approachExitVelocity`.
+ *
+ * **Position: the previous gap's near edge, the generous half.** Hugging that
+ * edge is zero clearance at the previous gate, so the figure below is the
+ * clearance holdable *here* given none *there* — which the header's "at every
+ * gate of a collecting run" does not license. `maxCentreDelta` is a statement
+ * about what the spawner may do; it does not entitle the collector to clip the
+ * previous gap's edge for free. The self-consistent figure — the largest C
+ * holdable at every gate, i.e. exiting the previous gap C px inside its edge —
+ * is `selfConsistentWorstGate` below, and it is **lower**.
+ *
+ * Neither half is a bound, so the published row is a point inside a band whose
+ * width is set by the two of them. `selfConsistentWorstGate` prices them
+ * together, which is the only combination that describes one actual collector.
  *
  * Maximising inward speed at a fixed point and a fixed time is a bang-bang
  * problem with a single switch — out at full acceleration, then back — and the
@@ -374,19 +396,57 @@ function bestOnSide(
 }
 
 /**
- * Grid resolution. Measured against a 1/4000 s, 400-sample reference: these
- * settings land every row within 0.5 px of it for a quarter of the work, which
- * matters because this table is computed in CI under coverage instrumentation.
- * `the model itself` in tests/cost.test.ts is what holds that claim.
+ * Grid resolution.
+ *
+ * ## The whole error lives in `dt`, and it is one-sided
+ *
+ * The old default of `dt = 1/500` claimed "every row within 0.5 px" on the
+ * strength of a convergence check that refined *both* knobs at once and ran
+ * balanced mode only (GOK-25, finding 2). Refined one at a time, at t = 90 s in
+ * worst-gate mode:
+ *
+ * - `switchSamples` 60 → 1600 at `dt = 1/4000`: **0.014 px**, and 60 / 120 / 240
+ *   are identical to three decimals. The switch time is inert above ~60.
+ * - `dt` 1/500 → 1/32000 at 60 samples: **0.78 px**, monotonically downward.
+ *
+ * The reason it is `dt` and the reason the bias has a sign are the same: the
+ * column constraint and the held clearance are *sampled* on the dt grid, in
+ * `flyReturn`'s loop, not solved. A coarse grid steps over near-misses, so it
+ * reports lines that do not survive and clearances the line never actually
+ * holds. Coarse is always optimistic, never pessimistic — which is the worst
+ * direction for a number that is graded against a floor. Making the position
+ * integration exact rather than Euler moves these rows by under 0.1 px, which
+ * is the control that says it is the sampling and not the integration.
+ *
+ * ## Why 1/8000
+ *
+ * Against a 1/32000 reference, every published row of both tables lands within
+ * **0.1 px**; 1/500 missed by up to 0.78, and 1/4000 is not reliably inside
+ * 0.1 either. The claim is held by `the model itself` in tests/cost.test.ts,
+ * which now refines `dt` alone and covers worst-gate mode, since that is the
+ * mode with the pinned table. It uses `REFERENCE_DT` rather than 1/32000
+ * because the two agree to 0.03 px everywhere and the test runs in CI under
+ * coverage instrumentation.
+ *
+ * The residual ~0.03 px of non-monotone jitter at that grid is the 1 px `dx`
+ * loop and the 96-sample switch bracket in `approachArrivalVelocity`, not `dt`.
+ * It is why the tables are published to one decimal and pinned to 0.1 px rather
+ * than quoted further.
  */
 const DEFAULTS: Required<CostModelOptions> = {
   rimEnters: true,
-  dt: 1 / 500,
+  dt: 1 / 8000,
   switchSamples: 60,
   worstGate: false,
   towardDelta: null,
   approachExitVelocity: 0,
 }
+
+/**
+ * The reference grid the default is measured against. Exported so the claim in
+ * the comment above and the test that holds it cannot drift apart.
+ */
+export const REFERENCE_DT = 1 / 16000
 
 /** What a ring costs at this difficulty, under the reference model. */
 export function collectingCost(elapsed: number, options: CostModelOptions = {}): CostRow {
@@ -413,6 +473,18 @@ export function collectingCost(elapsed: number, options: CostModelOptions = {}):
 /** The checkpoints the spec publishes. */
 export const COST_CHECKPOINTS = [0, 30, 60, 90, 150, 210, 270] as const
 
+/**
+ * One checkpoint past the end of them, in the regime §2.4's "no top" argument
+ * is actually about.
+ *
+ * The published checkpoints stop at t = 270 s, which is where the margin over
+ * the reachability floor is thinnest *of the ones that are measured* — and it
+ * keeps thinning after. `worstGateTowardDelta` is 0.000 px from t = 1200 s on,
+ * so the course is motionless here and this one row stands for the whole rest
+ * of the run, however long it is. See `ASYMPTOTIC_WORST_GATE`.
+ */
+export const ASYMPTOTE_CHECKPOINT = 1800
+
 export function costTable(options: CostModelOptions = {}): CostRow[] {
   return COST_CHECKPOINTS.map((t) => collectingCost(t, options))
 }
@@ -437,6 +509,19 @@ export function costTable(options: CostModelOptions = {}): CostRow[] {
  * Phase 1 is the regime where `E(t)` is above its floor, which is the one
  * structural difference between the two halves of the table and the reason the
  * hand derivation had to treat it specially.
+ *
+ * ## What the converged grid changed (GOK-25, finding 2 and finding 5)
+ *
+ * These stay as the numbers **spec §2.2 publishes**, deltas and all. They are
+ * not refreshed from the model here, because two of the three phase-1 cells the
+ * CTO ruled in on GOK-22 were this model's output on a grid that is now known
+ * to have been 0.4-0.7 px optimistic, and correcting a spec table is the CTO's
+ * call, not a quiet edit in a tool. `PHASE_2_SHORTFALL` below records the gap.
+ *
+ * The one that matters: on the converged grid **t = 90 misses by 2.01 px**, so
+ * §2.2's phase-2 row no longer reproduces to its own stated ±2 px. That row is
+ * hand-derived — it is the half of §2.2 that GOK-22 did *not* rule on — and it
+ * now fails the same way phase 1 did.
  */
 export const PUBLISHED_COST_TABLE: Readonly<Record<number, number>> = {
   0: 63.6,
@@ -449,34 +534,81 @@ export const PUBLISHED_COST_TABLE: Readonly<Record<number, number>> = {
 }
 
 /**
+ * This model minus `PUBLISHED_COST_TABLE`, on the converged grid.
+ *
+ * Pinned rather than described, so that the one cell outside §2.2's own ±2 px
+ * tolerance cannot quietly become two. Negative is the spec claiming the
+ * collecting line holds more clearance than it can.
+ *
+ * This is the same scaffolding GOK-22 asked me to delete, back for a different
+ * reason: not an ambiguity in the prose this time, but a shortfall only a
+ * converged instrument can see. It goes away when §2.2 is corrected, the way
+ * phase 1's did.
+ */
+export const PHASE_2_SHORTFALL: Readonly<Record<number, number>> = {
+  0: -0.73,
+  30: -0.48,
+  60: -0.42,
+  90: -2.01,
+  150: -0.15,
+  210: 0.76,
+  270: 1.22,
+}
+
+/**
  * The clearance a collector can hold on the **worst legal gate** at each
  * difficulty — spec §2.3, re-derived here after v2.1 struck the three phase-1
  * cells as impossible (72 px on the worst gate at t = 0 exceeded the 63.6 px
  * this model gives on the best one).
  *
- * These are this model's output at `worstGate: true`, i.e. the published row is
- * the instrument's, exactly as §2.2's now is.
+ * These are this model's output at `worstGate: true` — unlike §2.2's row they
+ * have never been in the spec, so they track the instrument rather than
+ * recording a claim about it, and the converged grid moves them.
  *
  * **Phase 1 re-derives to the best-gate figure**, because the approach there is
  * genuinely free: at t = 0 the gates are 288 px apart at 180 px/s, so the kite
  * has 0.84 s to absorb a 30 px course move that costs it nothing. The worst gate
  * and the best gate are the same gate until the interval starts to bite.
  *
- * **Phase 2 is 6-7 px tighter than v2.1's standing cells** (21.3 / 16.0 / 14.1 /
- * 13.4 against 28 / 22 / 19 / 19). Those cells were checked for consistency only
+ * **Phase 2 is 7-8 px tighter than v2.1's standing cells** (20.5 / 15.5 / 13.7 /
+ * 12.9 against 28 / 22 / 19 / 19). Those cells were checked for consistency only
  * against `worst <= best`, which they pass; they were never re-derived. Reported
  * on GOK-17 rather than edited into the spec here — see `requiredFloor`, which
  * is the part that is an acceptance criterion.
+ *
+ * **These were 63.6 / 48.6 / 41.5 / 21.3 / 16.0 / 14.1 / 13.4 one commit ago**,
+ * on `dt = 1/500`. Every cell moved down, because a coarse grid steps over
+ * near-misses and reports lines the kite cannot actually fly. The figure that
+ * mattered is the endgame one: 13.4 against a floor of 12.0 read as 1.4 px of
+ * margin, and the converged value of 12.9 is 0.9. See `requiredFloor` and
+ * `ASYMPTOTIC_WORST_GATE`.
  */
 export const WORST_GATE_TABLE: Readonly<Record<number, number>> = {
-  0: 63.6,
-  30: 48.6,
-  60: 41.5,
-  90: 21.3,
-  150: 16.0,
-  210: 14.1,
-  270: 13.4,
+  0: 62.9,
+  30: 48.0,
+  60: 41.1,
+  90: 20.5,
+  150: 15.5,
+  210: 13.7,
+  270: 12.9,
 }
+
+/**
+ * The worst-gate clearance out past the end of the published table, where the
+ * course has reached its floors and stops changing — `toward` is 0.000 px from
+ * t = 1200 s on, so this is the whole rest of the run.
+ *
+ * **It is the thinnest the acceptance criterion ever gets: 12.2 against a floor
+ * of 12.0.** The table stops at t = 270 s and §2.4's whole argument is that the
+ * ramp has no top, so seven checkpoints could not see the regime the argument
+ * is about (GOK-25, finding 3). On the old `dt = 1/500` grid this read 13.0 —
+ * a margin of 1.0 px where the true one is 0.2, overstating it five-fold.
+ *
+ * It still clears. It clears by less than the width of the kite's outline, and
+ * that is a fact about the design rather than about the instrument, so it is
+ * pinned here and reported rather than left at the end of a sweep nobody runs.
+ */
+export const ASYMPTOTIC_WORST_GATE = 12.2
 
 /**
  * The clearance the worst legal gate must leave for the ring to count as
@@ -488,6 +620,70 @@ export const WORST_GATE_TABLE: Readonly<Record<number, number>> = {
  */
 export function requiredFloor(elapsed: number): number {
   return Math.max(12, 0.25 * (gapHeight(elapsed) / 2 - KITE_RADIUS))
+}
+
+/**
+ * The largest clearance a collector can hold at **every** gate of a run on the
+ * worst legal course — the header's own words, taken literally.
+ *
+ * `WORST_GATE_TABLE` is not that number. It lets the kite leave the previous
+ * gap hugging the near edge, i.e. holding nothing there, in order to hold its
+ * figure here (see `approachArrivalVelocity`). Asking for the same C at both
+ * ends makes it a fixed point: `towardDelta` feeds nothing but the exit
+ * position, so `towardDelta = worstGateTowardDelta(t) + C` *is* "leave the
+ * previous gap C px inside its near edge", and the C that reproduces itself is
+ * the self-consistent one.
+ *
+ * The map is flat and then falls off a cliff — the approach is free until the
+ * kite has to start that much further back — so `f(C) - C` is decreasing with
+ * exactly one root, bracketed by `[0, f(0)]`. Regula falsi with the Illinois
+ * correction finds it in five or six evaluations; plain damped iteration took
+ * nearly thirty on the flat part, and each one is a full model evaluation.
+ *
+ * **At `exitVelocity = 0` this goes under the floor at t = 210 and t = 270**
+ * (11.8 and 11.2 against 12.0). It is not a FAIL of the acceptance criterion as
+ * written, because the criterion is written against `WORST_GATE_TABLE` and
+ * because the two exit assumptions are not independent: a collector that holds
+ * C at the previous gate is also *moving* as it leaves, and ~100 px/s restores
+ * every cell. But the two readings straddle the floor, and which one the spec
+ * means is the CTO's call rather than mine — GOK-17.
+ */
+export function selfConsistentWorstGate(elapsed: number, options: CostModelOptions = {}): number {
+  const base = worstGateTowardDelta(elapsed)
+  const at = (towardDelta: number | null): number =>
+    collectingCost(elapsed, { ...options, worstGate: true, towardDelta }).collectingClearance
+
+  // g(C) = f(C) - C, decreasing, with g(0) > 0 and g(f(0)) <= 0.
+  let lo = 0
+  let gLo = at(base) - lo
+  let hi = gLo
+  let gHi = at(base + hi) - hi
+  if (gLo <= 0) return lo
+  if (gHi >= 0) return hi
+
+  let c = hi
+  // 0.05 px, on the residual *or* on the bracket. Half the precision these
+  // tables are published to, and about the size of the grid's own jitter —
+  // which is why the bracket test has to be there too: near the root `g`
+  // wobbles by more than any residual bar worth setting, so a residual-only
+  // stop runs every iteration and each one is a full model evaluation.
+  for (let i = 0; i < 20; i += 1) {
+    c = (lo * gHi - hi * gLo) / (gHi - gLo)
+    const g = at(base + c) - c
+    if (Math.abs(g) < 0.05 || hi - lo < 0.05) return c
+    if (g > 0) {
+      lo = c
+      gLo = g
+      // Illinois: halve the stale end's weight so the bracket cannot stall on
+      // the flat half of the map.
+      gHi /= 2
+    } else {
+      hi = c
+      gHi = g
+      gLo /= 2
+    }
+  }
+  return c
 }
 
 /** Human-readable table, for `pnpm feel`. */
@@ -511,9 +707,10 @@ export function formatCostTable(options: CostModelOptions = {}): string {
     '',
     ...rows,
     '',
-    '  The last column is this model minus the published table. Since v2.1 the',
-    '  published table *is* this model, so every row reproduces; the phase-1 rows',
-    '  were corrected on GOK-22 rather than the model being bent to match them.',
+    '  The last column is this model minus the published table. The phase-1 cells',
+    '  were corrected to it on GOK-22; the phase-2 cells never were, and on the',
+    '  converged grid t = 90 s now misses §2.2’s own ±2 px by 0.01. Reported on',
+    '  GOK-17, not absorbed here — the spec is the CTO’s to correct.',
   ].join('\n')
 }
 
@@ -525,7 +722,7 @@ export function formatCostTable(options: CostModelOptions = {}): string {
  * broken as one that is free — and it goes back to the CTO.
  */
 export function formatWorstGateTable(options: CostModelOptions = {}): string {
-  const rows = COST_CHECKPOINTS.map((elapsed) => {
+  const rows = [...COST_CHECKPOINTS, ASYMPTOTE_CHECKPOINT].map((elapsed) => {
     const best = collectingCost(elapsed, options)
     const worst = collectingCost(elapsed, { ...options, worstGate: true })
     const floor = requiredFloor(elapsed)
@@ -536,9 +733,27 @@ export function formatWorstGateTable(options: CostModelOptions = {}): string {
       `worst gate ${worst.collectingClearance.toFixed(1).padStart(5)}px`,
       `floor ${floor.toFixed(1).padStart(5)}px`,
       worst.collectingClearance >= floor ? 'ok  ' : 'FAIL',
-      `spec ${String(WORST_GATE_TABLE[elapsed] ?? '?').padStart(5)}px`,
+      `spec ${(WORST_GATE_TABLE[elapsed]?.toFixed(1) ?? '—').padStart(5)}px`,
     ].join('  ')
   })
+  // The exit-position assumption, priced at the two cells where it reaches the
+  // floor. Each one is a fixed point over the whole model, so this is the most
+  // of it the report can afford; `the exit assumptions straddle the floor` in
+  // tests/cost.test.ts carries the rest.
+  const straddle = [210, 270].map((elapsed) => {
+    const floor = requiredFloor(elapsed)
+    const settled = selfConsistentWorstGate(elapsed, options)
+    const moving = selfConsistentWorstGate(elapsed, { ...options, approachExitVelocity: 100 })
+    return [
+      `  t=${`${elapsed}s`.padStart(5)}`,
+      `published ${(WORST_GATE_TABLE[elapsed] ?? NaN).toFixed(1).padStart(5)}px`,
+      `self-consistent, exit vy=0   ${settled.toFixed(1).padStart(5)}px`,
+      settled >= floor ? 'ok  ' : 'under',
+      `exit vy=100 ${moving.toFixed(1).padStart(5)}px`,
+      moving >= floor ? 'ok' : 'under',
+    ].join('  ')
+  })
+
   return [
     '  And on the worst legal gate — the largest move toward the ring (spec §2.3).',
     '',
@@ -546,7 +761,17 @@ export function formatWorstGateTable(options: CostModelOptions = {}): string {
     '',
     '  `floor` is max(12, 25% of the safe margin) and is an acceptance criterion,',
     '  not a prediction. Phase 1 re-derives to the best-gate figure: the approach',
-    '  is free while the gates are 1.6 s apart. Phase 2 comes out 6-7 px under the',
+    '  is free while the gates are 1.6 s apart. Phase 2 comes out 7-8 px under the',
     '  cells v2.1 left standing, which were never re-derived — reported on GOK-17.',
+    `  The last row is past the end of the published table, at t = ${ASYMPTOTE_CHECKPOINT} s, where`,
+    '  the course has reached its floors: it is the thinnest the criterion gets.',
+    '',
+    '  The published row assumes the kite leaves the previous gap at rest and',
+    '  hugging its near edge — holding nothing there to hold this. Asking for the',
+    '  same clearance at both gates is a fixed point, and it straddles the floor:',
+    '',
+    ...straddle,
+    '',
+    '  Neither reading is a bound. Which one §2.3 means is the CTO’s call — GOK-17.',
   ].join('\n')
 }
