@@ -99,10 +99,11 @@ export function encode(script: readonly boolean[]): number[] {
 /**
  * Replay a script and summarise the run, in the shape replay.json records.
  *
- * tests/determinism.test.ts has its own copy of this walk, deliberately: a
- * recorder and a test that share an implementation can agree with each other
- * while both being wrong about the game. If the two ever drift the test fails
- * loudly, which is the outcome worth having.
+ * tests/determinism.test.ts has its own copy of this walk, deliberately, so
+ * that editing one and forgetting the other fails loudly instead of quietly
+ * agreeing. Be precise about what that buys, though: the two are a verbatim
+ * copy, so a misconception shared by both is invisible to both. It pins the
+ * recorded numbers against drift, not the reasoning behind them.
  */
 function summarise(seed: number, script: readonly boolean[]): Record<string, unknown> {
   let state = step(createInitialState(seed), { holding: false, confirmPressed: true }, FIXED_DT)

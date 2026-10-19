@@ -34,7 +34,7 @@
 
 import { latencyFrames, playRun, type PlayerProfile, type RunResult } from './autopilot.js'
 import { centreLineMissAcrossTheRamp, sampleCourse, searchForFreeCollect } from './geometry.js'
-import { formatCostTable } from './cost.js'
+import { formatCostTable, formatWorstGateTable } from './cost.js'
 
 const SEEDS = Array.from({ length: 200 }, (_, i) => 1000 + i * 7)
 /**
@@ -45,7 +45,11 @@ const SEEDS = Array.from({ length: 200 }, (_, i) => 1000 + i * 7)
  * finite, so every number computed from a duration was really a number about the
  * cutoff (GOK-14). Spec v2 deletes it: the course now keeps tightening forever,
  * so a run ends because the course got you, and 600 s is here only to bound the
- * report's own runtime. **A run that reaches it is a finding, not a data point.**
+ * report's own runtime.
+ *
+ * v2.1: reaching it is a finding at COMPETENT and RUSTY, and the *expected*
+ * result at EXPERT — see `censoringReport` for why those are different
+ * questions rather than the same one asked twice.
  */
 const MAX_SECONDS = 600
 /** Whole input-to-pixel chain for a typical mid-range phone, not reaction time. */
@@ -183,10 +187,53 @@ function deathHistogram(results: readonly RunResult[]): void {
   })
   const column = crashes.filter((r) => r.crashCause === 'column').length
   console.log(`  cause: column ${column}, ground ${crashes.length - column}`)
-  console.log(
-    `  still alive at ${MAX_SECONDS}s (spec v2 says none should be): ` +
-      `${results.length - crashes.length}`,
-  )
+  console.log(`  still alive at ${MAX_SECONDS}s: ${results.length - crashes.length}`)
+}
+
+/**
+ * Spec §3 measurement 1, as v2.1 rewrites it.
+ *
+ * v2 asserted that *no run reaches 600 s at any modelled skill*. That was
+ * unsatisfiable rather than unmet, and the GOK-22 ruling says why: a fair
+ * course is one every legal gate can be answered on, so a controller whose own
+ * error is under the margin clears all of them, forever. Chasing the assertion
+ * would have bought an openly unfair game and still not bought the assertion —
+ * the gap floor has to fall from 110 px to 70 px before an expert run ends at
+ * all, against a derived fairness requirement of 99.3 px.
+ *
+ * So the criterion applies to COMPETENT and RUSTY, where censoring is a
+ * statement about the course against a player's error rate. **EXPERT is a
+ * control, not a criterion.** An exactly-predicting, exactly-perceiving
+ * controller surviving indefinitely is the signature of a fair course; the
+ * assertion on it runs in one direction only, and if it ever *stops* reaching
+ * the ceiling then a floor has been broken and that goes back to the CTO.
+ */
+const CENSORING_LIMIT = 0.15
+
+function censoringReport(
+  criteria: readonly string[],
+  controls: readonly string[],
+  at: (label: string) => readonly RunResult[],
+): void {
+  console.log('  criterion — at most 15% of runs may reach the ceiling:')
+  for (const label of criteria) {
+    const results = at(label)
+    const censored = results.filter((r) => r.censored).length
+    const share = results.length === 0 ? 0 : censored / results.length
+    console.log(
+      `  ${label.padEnd(24)} ${pct(censored, results.length).padStart(5)} censored   ` +
+        `${share <= CENSORING_LIMIT ? 'pass' : 'MISS'}`,
+    )
+  }
+  console.log('\n  control — reported, never asserted downward (see above):')
+  for (const label of controls) {
+    const results = at(label)
+    const censored = results.filter((r) => r.censored).length
+    console.log(
+      `  ${label.padEnd(24)} ${pct(censored, results.length).padStart(5)} censored   ` +
+        `${censored > 0 ? 'floors intact' : 'A FLOOR HAS BROKEN — back to the CTO'}`,
+    )
+  }
 }
 
 console.log(
@@ -208,6 +255,13 @@ console.log(
 )
 rateTable(
   PROFILES.map(([label]) => label),
+  at,
+)
+
+console.log('\nDoes the course bound a run? — spec §3 measurement 1, as v2.1 rewrites it:\n')
+censoringReport(
+  ['safe / competent', 'safe / rusty', 'collector / competent', 'collector / rusty'],
+  ['safe / expert', 'collector / expert'],
   at,
 )
 
@@ -274,3 +328,5 @@ console.log(
 
 console.log('\nWhat a ring costs — the reference model of spec §2.2:')
 console.log(formatCostTable())
+console.log('')
+console.log(formatWorstGateTable())

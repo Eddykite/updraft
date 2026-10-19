@@ -30,6 +30,12 @@
  * expensive ring) while half are "swinging" (a big course move, cheap ring).
  * That 50/50 is by construction, at every difficulty.
  *
+ * **What is new in v2.1: the away-magnitude is drawn from `[q·cap, cap]`** —
+ * see `magnitudeFloor`. The caps and the draw order are unchanged, and the rule
+ * is exactly inert for all `t <= 90`. It exists because the fairness derivation
+ * in §2.4 is done for the hardest legal gate and the generator was almost never
+ * building one.
+ *
  * A property test over 10,000 seeds asserts all of it, plus that the gap sits
  * inside the field, that every ring's disc lies entirely outside its gap band,
  * that the gap's centre line never collects, that the ring clears both columns
@@ -85,6 +91,33 @@ export function maxCentreDelta(seconds: number): number {
  */
 export function thermalTowardDelta(elapsed: number): number {
   return THERMAL_TOWARD_DELTA * (1 - secondProgress(elapsed))
+}
+
+/**
+ * The low end of the magnitude draw, in px (spec §2.3, the magnitude rule).
+ *
+ * An away-move is drawn from `[q·cap, cap]` rather than `[0, cap]`, so the
+ * typical gate closes on the hardest legal one as phase 2 tightens and reaches
+ * it only in the limit. A toward-move is unchanged: `[0, capToward]`.
+ *
+ * **Inert for the whole of phase 1**, because `q` is 0 for all `t <= 90` — which
+ * is why the teaching ramp, the cost table of §2.2 and the golden replay are
+ * untouched by this rule. That inertness is asserted directly, both here in
+ * tests/spawner.test.ts and by the golden replay continuing to pass unchanged;
+ * a v2.1 golden that *did* move would mean the rule had leaked into phase 1.
+ *
+ * Why it is free: `capAway` **is** the fairness bound — it is the reachability
+ * limit `maxCentreDelta(T)`, and §2.4's interval floor is derived for exactly
+ * that gate. Drawing from `[q·cap, cap] ⊂ [0, cap]` therefore cannot produce a
+ * gate that was not already legal and already reachable. No constant moves.
+ *
+ * Why it was needed: with the magnitude uniform on `[0, cap]` the mean move is
+ * `cap/2`, which peaks the kite at 238 px/s instead of the 336 px/s the gap
+ * floor was derived against — so the whole fairness derivation was being done
+ * for a gate the generator almost never built.
+ */
+export function magnitudeFloor(elapsed: number, toward: boolean, cap: number): number {
+  return toward ? 0 : secondProgress(elapsed) * cap
 }
 
 /** The y of the middle of a gate's gap. */
@@ -151,8 +184,12 @@ export function spawnGate(
     // Draw 2: direction, relative to the ring's side. Also a fair coin, which is
     // what makes exactly half the gates tight and half of them swinging.
     const [afterToward, toward] = nextBool(afterSide)
-    // Draw 3: magnitude, inside whichever cap this direction earns.
-    const [afterMag, magnitude] = nextRange(afterToward, 0, toward ? capToward : capAway)
+    // Draw 3: magnitude, inside whichever cap this direction earns. The range's
+    // *low* end is the v2.1 magnitude rule — zero for a toward-move and for the
+    // whole of phase 1, rising to the cap itself as phase 2 tightens. The draw
+    // order is unchanged; only this range moves.
+    const cap = toward ? capToward : capAway
+    const [afterMag, magnitude] = nextRange(afterToward, magnitudeFloor(elapsed, toward, cap), cap)
     next = afterMag
     // Clamping into the legal band can only *shorten* a move, so it can never
     // violate the reachability cap — which is why field bounds and reachability

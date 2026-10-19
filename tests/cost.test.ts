@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import {
+  COLLECT_REACH,
   COST_CHECKPOINTS,
   PUBLISHED_COST_TABLE,
+  WORST_GATE_TABLE,
   collectingCost,
   costTable,
+  requiredFloor,
   type CostRow,
 } from '../tools/feel/cost.js'
-import { KITE_RADIUS } from '../src/game/constants.js'
-import { gapHeight } from '../src/game/difficulty.js'
+import { GATE_WIDTH, KITE_RADIUS, THERMAL_LEAD, VY_CLAMP } from '../src/game/constants.js'
+import { gapHeight, scrollSpeed, thermalOutset } from '../src/game/difficulty.js'
 
 /**
  * What a ring costs (spec §3, "Collecting cost").
@@ -83,61 +86,151 @@ describe('the risk layer is real at every difficulty', () => {
 
 describe('the model against the table published in spec §2.2', () => {
   /**
-   * The second ramp reproduces, to the spec's own ±2 px, on every row. That is
-   * the half of the table this task exists to create, and it is the half where
-   * `E(t)` is at its 22 px floor.
+   * Since v2.1 the published table *is* this model's output, so the whole table
+   * reproduces rather than three rows of it documenting a shortfall. The three
+   * phase-1 cells were corrected on GOK-22 (79/64/50 → 63.6/48.6/41.5); the
+   * ruling was that the instrument is the contract and the hand-derived row was
+   * fitted to a headline.
    */
-  it('reproduces every row of the second ramp to within 2 px', () => {
-    for (const elapsed of [90, 150, 210, 270]) {
+  it('reproduces every published row to within 2 px', () => {
+    for (const elapsed of COST_CHECKPOINTS) {
       const published = PUBLISHED_COST_TABLE[elapsed] as number
       expect(Math.abs(row(elapsed).collectingClearance - published)).toBeLessThanOrEqual(2)
     }
   })
 
   /**
-   * The three phase-1 rows do not, and the gap is pinned here rather than left
-   * in a comment, so that it is visible every time this suite runs and so that
-   * a later change to either side shows up as a diff.
-   *
-   * This model reports the early detour as 8 to 16 px *more* expensive than
-   * published. The t = 0 figure is not merely unmatched but unreachable: the
-   * speed clamp alone caps the holdable clearance there at 72.6 px against a
-   * published 79. Under the loose reading of the traversal window the same rows
-   * come out 9 to 15 px cheaper than published instead — so no single reading of
-   * the model's own prose yields the published phase-1 numbers.
-   *
-   * Reported to the CTO on GOK-17. Not tuned away: no gameplay constant moves to
-   * make a measurement agree with a table.
+   * And the three corrected cells are pinned tight, because they are not an
+   * independent claim this model is being checked against — they are its own
+   * output, rounded to a decimal. A drift of more than 0.1 px here means the
+   * model moved and the spec did not.
    */
-  it('does not reproduce phase 1, and records by how much', () => {
-    const shortfall = (elapsed: number): number =>
-      (PUBLISHED_COST_TABLE[elapsed] as number) - row(elapsed).collectingClearance
-    expect(shortfall(0)).toBeCloseTo(15.4, 0)
-    expect(shortfall(30)).toBeCloseTo(15.4, 0)
-    expect(shortfall(60)).toBeCloseTo(8.5, 0)
+  it('pins the three corrected phase-1 cells to a tenth of a pixel', () => {
+    for (const elapsed of [0, 30, 60]) {
+      const published = PUBLISHED_COST_TABLE[elapsed] as number
+      expect(row(elapsed).collectingClearance).toBeCloseTo(published, 1)
+    }
   })
 
-  it('has an analytic ceiling at t = 0 that the published 79 px exceeds', () => {
+  /**
+   * The negative test the ruling specifically asked to keep: the *loose*
+   * reading of the traversal window is not what the table reports.
+   *
+   * That ambiguity — whether traversal begins when the kite's rim reaches the
+   * column or when its centre does — is what produced the original error, since
+   * v2's published numbers sat between the two readings so that neither
+   * produced them. Rim is what collision.ts enforces. Pinning the gap stops the
+   * table from being quietly reinterpreted back into the ambiguity.
+   */
+  it('is the strict reading: the loose one is 8.7 to 30.6 px looser', () => {
+    const loose = costTable({ rimEnters: false })
+    const gaps = COST_CHECKPOINTS.map((elapsed, i) => {
+      const published = PUBLISHED_COST_TABLE[elapsed] as number
+      return (loose[i] as CostRow).collectingClearance - published
+    })
+    for (const gap of gaps) expect(gap).toBeGreaterThan(8)
+    expect(Math.min(...gaps)).toBeCloseTo(8.7, 0)
+    expect(Math.max(...gaps)).toBeCloseTo(30.6, 0)
+  })
+
+  it('has an analytic ceiling at t = 0 that v2 published above', () => {
     // Independent of the optimiser: the shallowest collecting altitude is
-    // `h/2 + E - 38` from the gap centre, the rim constraint bites 13 px of
-    // world travel after the ring is level with the kite, and nothing can cross
-    // that distance faster than the speed clamp.
+    // `h/2 + E - COLLECT_REACH` from the gap centre, the rim constraint bites
+    // `THERMAL_LEAD - GATE_WIDTH/2 - KITE_RADIUS` px of world travel after the
+    // ring is level with the kite, and nothing crosses that faster than the
+    // speed clamp. This is why 79 px was unreachable rather than merely
+    // unmatched, and it is the whole argument for the correction — so its
+    // inputs are read from constants rather than written in as literals.
     const h = gapHeight(0)
     const safe = h / 2 - KITE_RADIUS
+    const rimBites = THERMAL_LEAD - GATE_WIDTH / 2 - KITE_RADIUS
     const best = (dx: number): number => {
-      const slack = Math.sqrt(Math.max(0, 38 * 38 - dx * dx))
-      const mustReach = h / 2 + 76 - slack
-      const seconds = (dx + 13) / 180
-      return safe - (mustReach - 560 * seconds)
+      const slack = Math.sqrt(Math.max(0, COLLECT_REACH * COLLECT_REACH - dx * dx))
+      const mustReach = h / 2 + thermalOutset(0) - slack
+      const seconds = (dx + rimBites) / scrollSpeed(0)
+      return safe - (mustReach - VY_CLAMP * seconds)
     }
     let ceiling = -Infinity
-    for (let dx = 0; dx <= 38; dx += 0.01) ceiling = Math.max(ceiling, best(dx))
+    for (let dx = 0; dx <= COLLECT_REACH; dx += 0.01) ceiling = Math.max(ceiling, best(dx))
     expect(ceiling).toBeCloseTo(72.6, 0)
-    expect(ceiling).toBeLessThan(PUBLISHED_COST_TABLE[0] as number)
+    // The number v2 published, which this ceiling rules out under any control
+    // law. Kept as a literal on purpose: it is a historical claim, not a
+    // quantity that should follow the constants if they move.
+    expect(ceiling).toBeLessThan(79)
     // And this model, which also has to survive the traversal, lands under it.
     expect(row(0).collectingClearance).toBeLessThan(ceiling)
   })
 })
+
+describe('the worst legal gate (spec §2.3)', () => {
+  const WORST = COST_CHECKPOINTS.map((t) => collectingCost(t, { worstGate: true }))
+  const worst = (elapsed: number): CostRow => {
+    const found = WORST.find((r) => r.elapsed === elapsed)
+    if (found === undefined) throw new Error(`no worst-gate row at t = ${elapsed}`)
+    return found
+  }
+
+  /**
+   * **The acceptance criterion.** A ring that cannot be taken without dying is
+   * as broken as one that is free, so the hardest legal gate still has to leave
+   * `max(12, 25% of the margin)`. A failure here is a reachability failure and
+   * goes back to the CTO — it is not something to absorb into a constant.
+   */
+  it('still leaves the ring takeable at every published checkpoint', () => {
+    for (const r of WORST) {
+      expect(r.collectingClearance).toBeGreaterThanOrEqual(requiredFloor(r.elapsed))
+    }
+  })
+
+  it('is never easier than the typical gate, and never free', () => {
+    for (const r of WORST) {
+      expect(r.collectingClearance).toBeLessThanOrEqual(
+        (PUBLISHED_COST_TABLE[r.elapsed] as number) + 0.1,
+      )
+      expect(r.collectingClearance).toBeGreaterThan(0)
+    }
+  })
+
+  /**
+   * Phase 1 re-derives to the best-gate figure exactly, and that is the finding
+   * rather than a rounding artefact: at t = 0 the gates are 288 px apart at
+   * 180 px/s, so the kite has 0.84 s of approach in which a 30 px course move
+   * costs it nothing at all. The worst gate and the best gate are the same gate
+   * until the interval starts to bite, which is why v2's 72 / 59 / 45 px could
+   * not have been right — they claimed the worst gate was *harder* than this
+   * model says the best one is.
+   */
+  it('costs nothing extra in phase 1, where the approach is free', () => {
+    for (const elapsed of [0, 30, 60]) {
+      expect(worst(elapsed).collectingClearance).toBeCloseTo(row(elapsed).collectingClearance, 1)
+    }
+  })
+
+  /** And it does bite in phase 2, where the interval has closed up. */
+  it('costs real clearance in phase 2', () => {
+    for (const elapsed of [90, 150, 210, 270]) {
+      expect(worst(elapsed).collectingClearance).toBeLessThan(row(elapsed).collectingClearance - 4)
+    }
+  })
+
+  it('matches the row published in spec §2.3', () => {
+    for (const elapsed of COST_CHECKPOINTS) {
+      expect(worst(elapsed).collectingClearance).toBeCloseTo(WORST_GATE_TABLE[elapsed] as number, 1)
+    }
+  })
+
+  /**
+   * The required floor is derived, not transcribed: it is 25% of the margin
+   * until the margin gets small enough for the absolute 12 px to take over,
+   * which happens between t = 150 and t = 210.
+   */
+  it('derives its floor from the gap the ramp actually produces', () => {
+    expect(requiredFloor(0)).toBeCloseTo(28.5, 1)
+    expect(requiredFloor(90)).toBeCloseTo(14.75, 2)
+    expect(requiredFloor(210)).toBe(12)
+    expect(requiredFloor(3600)).toBe(12)
+  })
+}, 120_000)
 
 describe('the model itself', () => {
   it('has settled: refining the grid moves no row by more than half a pixel', () => {

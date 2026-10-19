@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  DIFFICULTY_RAMP_SECONDS,
   FIRST_GATE_DELAY,
   GAP_Y_MAX_EDGE,
   GAP_Y_MIN,
@@ -18,10 +19,17 @@ import {
   VY_CLAMP,
 } from '../src/game/constants.js'
 import { thermalX } from '../src/game/collision.js'
-import { gapHeight, scrollSpeed, spawnInterval, thermalOutset } from '../src/game/difficulty.js'
+import {
+  gapHeight,
+  scrollSpeed,
+  secondProgress,
+  spawnInterval,
+  thermalOutset,
+} from '../src/game/difficulty.js'
 import { createRng } from '../src/game/rng.js'
 import {
   gapCentre,
+  magnitudeFloor,
   maxCentre,
   maxCentreDelta,
   minCentre,
@@ -157,6 +165,54 @@ describe('thermalTowardDelta', () => {
     expect(thermalTowardDelta(210)).toBeCloseTo(7.5, 9)
     expect(thermalTowardDelta(600)).toBeLessThan(0.1)
     expect(thermalTowardDelta(600)).toBeGreaterThan(0)
+  })
+})
+
+describe('the magnitude rule (spec §2.3, new in v2.1)', () => {
+  /**
+   * The inertness that earns phase 1 its exemption, asserted on the range
+   * itself rather than inferred from a sample.
+   *
+   * This is the load-bearing property of the whole rule: it is what lets §2.2's
+   * cost table, the teaching ramp and the golden replay stay untouched by a
+   * change to the generator. The golden file is the second, independent check —
+   * it dies at t = 50.6 s and still passes bit for bit, trajectory checksum
+   * included, which it could not do if the floor were nonzero anywhere before
+   * then.
+   */
+  it('is exactly inert for every t in phase 1', () => {
+    for (let t = 0; t <= DIFFICULTY_RAMP_SECONDS; t += 0.25) {
+      expect(magnitudeFloor(t, false, 100)).toBe(0)
+      expect(magnitudeFloor(t, true, 100)).toBe(0)
+    }
+  })
+
+  /**
+   * And in phase 2 it closes on the cap, reaching it only in the limit — the
+   * hardest legal gate becomes the one the course approaches rather than an
+   * outlier it occasionally rolls.
+   */
+  it('closes the away-range on the cap as phase 2 tightens, and never reaches it', () => {
+    const cap = 100
+    expect(magnitudeFloor(150, false, cap)).toBeCloseTo(50, 9)
+    expect(magnitudeFloor(210, false, cap)).toBeCloseTo(75, 9)
+    expect(magnitudeFloor(270, false, cap)).toBeCloseTo(87.5, 9)
+    // t = 600 s is 8.5 half-lives into phase 2: q = 1 - 2^-8.5 = 0.99724, so
+    // the away-range has closed to the last 0.28% of the cap and is still
+    // closing. It approaches the cap and, in exact arithmetic, never arrives.
+    expect(magnitudeFloor(600, false, cap)).toBeLessThan(cap)
+    expect(magnitudeFloor(600, false, cap)).toBeCloseTo(99.72, 2)
+    // A toward-move keeps the full range at every difficulty.
+    for (const t of [0, 90, 150, 600]) expect(magnitudeFloor(t, true, cap)).toBe(0)
+  })
+
+  /** Monotone in t, like everything else the ramp drives. */
+  it('never loosens as the run goes on', () => {
+    for (let t = 0; t < 600; t += 1) {
+      expect(magnitudeFloor(t + 1, false, 100)).toBeGreaterThanOrEqual(
+        magnitudeFloor(t, false, 100),
+      )
+    }
   })
 })
 
@@ -335,6 +391,9 @@ describe(`the invariants hold over ${SEEDS.toLocaleString('en-US')} seeds`, () =
       let worstColumnClearance = Infinity
       let worstNeighbourClearance = Infinity
       let worstFieldMargin = Infinity
+      let worstMagnitudeSlack = Infinity
+      let awayGatesInPhase2 = 0
+      let edgeClampedAwayGates = 0
       let gatesChecked = 0
 
       for (let seed = 0; seed < SEEDS; seed += 1) {
@@ -374,7 +433,39 @@ describe(`the invariants hold over ${SEEDS.toLocaleString('en-US')} seeds`, () =
           }
           worstTowardRatio = Math.max(worstTowardRatio, (delta * u) / towardCap)
 
-          // 3. The whole gap is inside the legal band.
+          // 3. THE MAGNITUDE RULE (v2.1). On a gate that moves *away* from the
+          //    ring's side, the move is at least q·maxCentreDelta — unless the
+          //    centre landed on a band edge, where clamping shortened it.
+          //
+          //    **The edge exemption is load-bearing, not defensive.** Clamping
+          //    into [loC, hiC] shortens the move on 16.2% of phase-2 away-gates
+          //    (224,047 of 1,385,865 here), so the same assertion written
+          //    without it does not fail occasionally — measured over these
+          //    10,000 seeds it fails on 9,994 of them. The counters below are
+          //    what stop the exemption from quietly swallowing the clause.
+          const height = gapHeight(elapsed)
+          const outset = thermalOutset(elapsed)
+          const low = minCentre(height, outset)
+          const high = maxCentre(height, outset)
+          const atEdge = centre <= low + 1e-9 || centre >= high - 1e-9
+          if (delta * u < 0 && secondProgress(elapsed) > 0) {
+            awayGatesInPhase2 += 1
+            if (atEdge) {
+              edgeClampedAwayGates += 1
+            } else {
+              const floor = magnitudeFloor(elapsed, false, limit)
+              if (Math.abs(delta) < floor - 1e-9) {
+                throw new Error(
+                  `seed ${seed}, gate ${gate.id}: away-move of ${Math.abs(delta).toFixed(2)}px ` +
+                    `at t=${elapsed.toFixed(1)}s is under the q·cap floor of ${floor.toFixed(2)}px ` +
+                    `(centre ${centre.toFixed(2)} is not at a band edge)`,
+                )
+              }
+              worstMagnitudeSlack = Math.min(worstMagnitudeSlack, Math.abs(delta) - floor)
+            }
+          }
+
+          // 4. The whole gap is inside the legal band.
           if (gate.gapY < GAP_Y_MIN - 1e-9 || gapBottom > GAP_Y_MAX_EDGE + 1e-9) {
             throw new Error(
               `seed ${seed}, gate ${gate.id}: gap [${gate.gapY.toFixed(2)}, ` +
@@ -387,7 +478,7 @@ describe(`the invariants hold over ${SEEDS.toLocaleString('en-US')} seeds`, () =
             GAP_Y_MAX_EDGE - gapBottom,
           )
 
-          // 4. THE REPLACEMENT INVARIANT. The ring's disc lies entirely outside
+          // 5. THE REPLACEMENT INVARIANT. The ring's disc lies entirely outside
           //    the gap band — equivalently, a kite that collects is at that
           //    instant at least h/2 - KITE_RADIUS from the gap centre, i.e. it has
           //    left the safe corridor completely. This is the exact mirror of the
@@ -401,7 +492,7 @@ describe(`the invariants hold over ${SEEDS.toLocaleString('en-US')} seeds`, () =
           }
           worstOutsideGap = Math.min(worstOutsideGap, outsideBy)
 
-          // 5. The direct regression test for the v1 defect: the gap's centre line
+          // 6. The direct regression test for the v1 defect: the gap's centre line
           //    never collects, at any t. Under v1 this failed on 65% of gates and
           //    on 100% of them from t = 77 s.
           const centreLineMiss = offset - COLLECT_REACH
@@ -413,7 +504,7 @@ describe(`the invariants hold over ${SEEDS.toLocaleString('en-US')} seeds`, () =
           }
           worstCentreLineMiss = Math.min(worstCentreLineMiss, centreLineMiss)
 
-          // 6. The ring's disc is 7 px clear of both of its own gate's columns,
+          // 7. The ring's disc is 7 px clear of both of its own gate's columns,
           //    and clear of the previous gate's columns too — it sits in genuine
           //    open air, not tucked against a hazard.
           const ringX = thermalX(gate)
@@ -433,7 +524,7 @@ describe(`the invariants hold over ${SEEDS.toLocaleString('en-US')} seeds`, () =
           }
           previousSpawn = elapsed
 
-          // 7. The whole ring is reachable and visible: its centre stays inside
+          // 8. The whole ring is reachable and visible: its centre stays inside
           //    the kite's flyable band, inset by the radius and a 20 px margin.
           if (gate.thermal.y < THERMAL_Y_MIN - 1e-9 || gate.thermal.y > THERMAL_Y_MAX + 1e-9) {
             throw new Error(
@@ -460,6 +551,21 @@ describe(`the invariants hold over ${SEEDS.toLocaleString('en-US')} seeds`, () =
       expect(worstDeltaRatio).toBeLessThanOrEqual(1)
       expect(worstTowardRatio).toBeGreaterThan(0.9)
       expect(worstTowardRatio).toBeLessThanOrEqual(1)
+
+      // The magnitude rule, and the two numbers that stop its edge exemption
+      // from being a licence. There have to be plenty of phase-2 away-gates for
+      // clause 3 to have tested anything; the clamped share has to be a real
+      // minority (so the exemption is not swallowing the clause); and it has to
+      // be nonzero (so the exemption is genuinely load-bearing rather than
+      // defensive — without it this test fails on 9,994 of these 10,000 seeds).
+      expect(awayGatesInPhase2).toBeGreaterThan(1_000_000)
+      const clampedShare = edgeClampedAwayGates / awayGatesInPhase2
+      expect(clampedShare).toBeGreaterThan(0.05)
+      expect(clampedShare).toBeLessThan(0.3)
+      // And the clause binds: the tightest unclamped away-move in 3.5M gates
+      // sits right on its q·cap floor rather than comfortably above it.
+      expect(worstMagnitudeSlack).toBeGreaterThanOrEqual(0)
+      expect(worstMagnitudeSlack).toBeLessThan(0.5)
       // The ring's field bound is the one that actually binds, so it is the one
       // that has to reach zero for this test not to be vacuous. The gap's own
       // margin bottoms out at the 14 px of slack between the two bounds, which is

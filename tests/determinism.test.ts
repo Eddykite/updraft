@@ -14,8 +14,18 @@ import { step } from '../src/game/update.js'
  *
  * An *intentional* change to game feel also fails here, which is the point: the
  * numbers in that file only move when someone decides to move them, in a diff a
- * reviewer can see. There is no regeneration flag, and the recorder that
- * produced the script is deliberately not in the repo.
+ * reviewer can see. There is no regeneration flag. The recorder does now live in
+ * the repo — `tools/feel/record-golden.ts`, added for v2 because v1's prose
+ * description of it described a line aimed inside the gap, which v2 does not
+ * have — but nothing runs it automatically and its output is still a diff.
+ *
+ * **On the two replay walks.** `replay` below and `summarise` in the recorder
+ * are the same walk written twice. That catches "edited one, forgot the other",
+ * which is worth having and is why they are not shared. It does **not** catch a
+ * shared misconception about the game, and an earlier version of this comment
+ * claimed it did — the two are a verbatim copy, so any belief wrong in one is
+ * wrong identically in the other. The honest statement of what this file pins
+ * is: the recorded numbers, not the reasoning that produced them.
  */
 
 interface Golden {
