@@ -1,20 +1,22 @@
 import { describe, expect, it } from 'vitest'
 import {
   ASYMPTOTE_CHECKPOINT,
-  ASYMPTOTIC_WORST_GATE,
   COLLECT_REACH,
   COST_CHECKPOINTS,
-  PHASE_2_SHORTFALL,
+  CYCLE_GRID,
+  NEAR_EDGE_WORST_GATE,
+  PUBLISHED_CHECKPOINTS,
   PUBLISHED_COST_TABLE,
+  PUBLISHED_COST_TABLE_REVISION,
   REFERENCE_DT,
-  WORST_GATE_TABLE,
+  SELF_CONSISTENT_WORST_GATE,
   collectingCost,
   costTable,
   requiredFloor,
-  selfConsistentWorstGate,
-  worstGateTowardDelta,
+  worstCycle,
   type CostRow,
 } from '../tools/feel/cost.js'
+import { SPEC_REVISION } from '../tools/spec-revision.js'
 import { GATE_WIDTH, KITE_RADIUS, THERMAL_LEAD, VY_CLAMP } from '../src/game/constants.js'
 import { gapHeight, scrollSpeed, thermalOutset } from '../src/game/difficulty.js'
 
@@ -26,7 +28,7 @@ import { gapHeight, scrollSpeed, thermalOutset } from '../src/game/difficulty.js
  * costs, and it is deliberately not dressed up as a proof — it asserts the
  * output of a model whose assumptions are listed in tools/feel/cost.ts.
  *
- * It computes the whole table once (about 1.6 s) and asserts against that.
+ * It computes the whole table once (about 2 s) and asserts against that.
  */
 
 const TABLE = costTable()
@@ -54,7 +56,9 @@ describe('the risk layer is real at every difficulty', () => {
     for (const r of TABLE) {
       expect(r.collectingClearance).toBeGreaterThan(0)
       // A ring that cannot be taken without dying is as broken as one that is
-      // free; 18 px of daylight at the asymptote is the thinnest it ever gets.
+      // free; 18.7 px of daylight at the asymptote is the thinnest it ever gets
+      // on a typical gate. What the *worst* gate leaves is §2.3's question and
+      // a much tighter number — see below.
       expect(r.collectingClearance).toBeGreaterThan(15)
     }
   })
@@ -92,49 +96,61 @@ describe('the risk layer is real at every difficulty', () => {
 
 describe('the model against the table published in spec §2.2', () => {
   /**
-   * **This no longer passes for the whole table, and that is the finding.**
+   * **The guard §3 added in v2.2, and the whole reason this file has one.**
    *
-   * v2.1 corrected §2.2's three phase-1 cells to this model's output
-   * (79/64/50 → 63.6/48.6/41.5) on the ruling that the instrument is the
-   * contract. It did not touch the phase-2 cells, which are still v2's hand
-   * derivation. On the converged grid (GOK-25 finding 2 — the old `dt = 1/500`
-   * default was up to 0.8 px optimistic) t = 90 s misses by 2.01 px, just
-   * outside §2.2's own stated tolerance.
+   * On GOK-27 the in-code transcription of §2.2's table was found to be a full
+   * revision behind the document, and all 23 tests passed anyway — because
+   * every assertion compared the model to the transcription and nothing
+   * compared the transcription to the spec. The one mechanism meant to catch a
+   * hand-edited table was the mechanism that hid one: it reported a 2.01 px
+   * shortfall against a cell §2.2 had already replaced.
    *
-   * So the tolerance is asserted where it holds and the one cell outside it is
-   * named, rather than the bar being widened until everything fits. Reported on
-   * GOK-17; correcting §2.2 is the CTO's call.
+   * Nothing in this repo can read the document, so this cannot verify the
+   * numbers. What it does is make staleness fail *loudly at the moment the spec
+   * moves*: bump `SPEC_REVISION` and this goes red until someone opens the new
+   * §2.2, re-reads the table, and bumps the transcription's own revision with
+   * it. That read is the verification; this is what forces it to happen.
    */
-  it('reproduces every published row to within 2 px, except t = 90 s', () => {
-    for (const elapsed of COST_CHECKPOINTS) {
+  it('is not a revision stale: the table names the spec revision it came from', () => {
+    expect(PUBLISHED_COST_TABLE_REVISION).toBe(SPEC_REVISION)
+  })
+
+  /**
+   * §3's pin: every published row within the ±2 px §2.2 states, with no
+   * exceptions and none named. The exception that used to be here — "except
+   * t = 90 s" — was an artefact of the stale copy, not a property of the
+   * design.
+   */
+  it('reproduces every published row to within 2 px', () => {
+    for (const elapsed of PUBLISHED_CHECKPOINTS) {
       const delta = Math.abs(
         row(elapsed).collectingClearance - (PUBLISHED_COST_TABLE[elapsed] as number),
       )
-      if (elapsed === 90) expect(delta).toBeGreaterThan(2)
-      else expect(delta).toBeLessThanOrEqual(2)
+      expect(delta).toBeLessThanOrEqual(2)
     }
   })
 
   /**
-   * Every delta pinned, not just the one that broke the bar. Three of the four
-   * phase-2 cells drifted when the grid converged and the fourth moved by a
-   * pixel; pinning them is what stops "one cell is out" becoming two without
-   * anyone noticing, which is how the phase-1 error survived review.
+   * And far tighter than that, because v2.2's table **is** this model's output
+   * on this grid: every residual is inside the rounding of the one decimal
+   * §2.2 publishes to.
    *
-   * The phase-1 rows are in here too. They were the model's own output as of
-   * GOK-22 and now sit 0.4-0.7 px off it, for the same reason: the grid they
-   * were measured on was coarse. That is a spec correction owed, not a model
-   * failure, so it is recorded rather than asserted away.
+   * This is what replaces `PHASE_2_SHORTFALL`. That constant pinned a seven-cell
+   * residual so a second cell could not drift out quietly, which was the right
+   * instinct aimed at the wrong thing: three of its cells were wrong because
+   * they inherited a stale baseline, and what it was really recording was the
+   * staleness of the copy rather than a shortfall in the design. There is no
+   * shortfall to pin, so the bar is the publication rounding instead.
    */
-  it('pins every delta, so a second cell cannot drift out quietly', () => {
-    for (const elapsed of COST_CHECKPOINTS) {
+  it('is the published table, to the rounding it is published at', () => {
+    for (const elapsed of PUBLISHED_CHECKPOINTS) {
       const delta = row(elapsed).collectingClearance - (PUBLISHED_COST_TABLE[elapsed] as number)
-      expect(delta).toBeCloseTo(PHASE_2_SHORTFALL[elapsed] as number, 1)
+      expect(Math.abs(delta)).toBeLessThan(0.05)
     }
   })
 
   /**
-   * The negative test the ruling specifically asked to keep: the *loose*
+   * The negative test the GOK-22 ruling specifically asked to keep: the *loose*
    * reading of the traversal window is not what the table reports.
    *
    * That ambiguity — whether traversal begins when the kite's rim reaches the
@@ -143,16 +159,16 @@ describe('the model against the table published in spec §2.2', () => {
    * produced them. Rim is what collision.ts enforces. Pinning the gap stops the
    * table from being quietly reinterpreted back into the ambiguity.
    */
-  it('is the strict reading: the loose one is 7.3 to 31.2 px looser', () => {
-    // Model against model, not model against the spec. The published row has
-    // its own drift now (`PHASE_2_SHORTFALL`), and subtracting it from this
-    // comparison would mix a shortfall into a statement about the two readings.
+  it('is the strict reading: the loose one is 6.9 to 31.2 px looser', () => {
+    // Model against model, not model against the spec: this is a statement
+    // about two readings of one sentence, and mixing a transcription residual
+    // into it would make it a statement about neither.
     const loose = costTable({ rimEnters: false })
-    const gaps = COST_CHECKPOINTS.map(
+    const gaps = PUBLISHED_CHECKPOINTS.map(
       (elapsed, i) => (loose[i] as CostRow).collectingClearance - row(elapsed).collectingClearance,
     )
-    for (const gap of gaps) expect(gap).toBeGreaterThan(7)
-    expect(Math.min(...gaps)).toBeCloseTo(7.3, 1)
+    for (const gap of gaps) expect(gap).toBeGreaterThan(6)
+    expect(Math.min(...gaps)).toBeCloseTo(6.9, 1)
     expect(Math.max(...gaps)).toBeCloseTo(31.2, 1)
     // Monotone in t, which is the shape the argument rests on: the two readings
     // differ by one kite radius of travel, and that is worth less time as the
@@ -189,107 +205,44 @@ describe('the model against the table published in spec §2.2', () => {
     // And this model, which also has to survive the traversal, lands under it.
     expect(row(0).collectingClearance).toBeLessThan(ceiling)
   })
+
+  it('covers every checkpoint the spec publishes, the `→ ∞` cell included', () => {
+    expect(TABLE.map((r) => r.elapsed)).toEqual([...PUBLISHED_CHECKPOINTS])
+    expect(Object.keys(PUBLISHED_COST_TABLE).map(Number)).toEqual([...PUBLISHED_CHECKPOINTS])
+    expect(PUBLISHED_CHECKPOINTS).toEqual([...COST_CHECKPOINTS, ASYMPTOTE_CHECKPOINT])
+    expect(ASYMPTOTE_CHECKPOINT).toBeGreaterThan(Math.max(...COST_CHECKPOINTS))
+    // The asymptotic row really is the asymptote: the course has reached its
+    // floors long before t = 1800 s, so this cell is every gate of the rest of
+    // a run of any length rather than a limit it approaches.
+    expect(gapHeight(ASYMPTOTE_CHECKPOINT)).toBeCloseTo(gapHeight(3600), 5)
+  })
 }, 60_000)
 
-describe('the worst legal gate (spec §2.3)', () => {
-  const WORST = COST_CHECKPOINTS.map((t) => collectingCost(t, { worstGate: true }))
-  const worst = (elapsed: number): CostRow => {
-    const found = WORST.find((r) => r.elapsed === elapsed)
-    if (found === undefined) throw new Error(`no worst-gate row at t = ${elapsed}`)
+describe('the collector the struck §2.3 row was measured on', () => {
+  const NEAR = PUBLISHED_CHECKPOINTS.map((t) => collectingCost(t, { worstGate: true }))
+  const near = (elapsed: number): CostRow => {
+    const found = NEAR.find((r) => r.elapsed === elapsed)
+    if (found === undefined) throw new Error(`no near-edge row at t = ${elapsed}`)
     return found
   }
 
   /**
-   * **The acceptance criterion.** A ring that cannot be taken without dying is
-   * as broken as one that is free, so the hardest legal gate still has to leave
-   * `max(12, 25% of the margin)`. A failure here is a reachability failure and
-   * goes back to the CTO — it is not something to absorb into a constant.
+   * **This row is struck in spec v2.2 and is not a published figure.** It is
+   * reproduced so that the strike can be checked against the numbers that
+   * earned it, and because it is the ceiling the self-consistent bisection
+   * brackets against. Nothing is graded on it.
    */
-  it('still leaves the ring takeable at every published checkpoint', () => {
-    for (const r of WORST) {
-      expect(r.collectingClearance).toBeGreaterThanOrEqual(requiredFloor(r.elapsed))
+  it('reproduces the figures the strike was argued from', () => {
+    for (const elapsed of PUBLISHED_CHECKPOINTS) {
+      expect(near(elapsed).collectingClearance).toBeCloseTo(
+        NEAR_EDGE_WORST_GATE[elapsed] as number,
+        1,
+      )
     }
-  })
-
-  /**
-   * And past the end of them, which is the regime §2.4 is proudest of.
-   *
-   * The published checkpoints stop at t = 270 s. The margin over the floor is
-   * thinnest at the *last* one and keeps thinning after it, so seven samples
-   * could not see the part of the ramp the "no top" argument is about
-   * (GOK-25, finding 3). By t = 1200 s the course has stopped moving entirely —
-   * `worstGateTowardDelta` is 0 — so this single row stands for the whole rest
-   * of a run of any length.
-   *
-   * It clears, by **0.2 px**. On the pre-GOK-25 grid it read 13.0 against the
-   * same floor, a margin five times its true size, so this is also the clearest
-   * statement of why the default grid had to move: the instrument's own error
-   * was larger than the quantity being measured.
-   */
-  it('still leaves it takeable out at the asymptote, by a fifth of a pixel', () => {
-    const late = collectingCost(ASYMPTOTE_CHECKPOINT, { worstGate: true })
-    expect(late.collectingClearance).toBeCloseTo(ASYMPTOTIC_WORST_GATE, 1)
-    expect(late.collectingClearance).toBeGreaterThanOrEqual(requiredFloor(ASYMPTOTE_CHECKPOINT))
-    expect(late.collectingClearance - requiredFloor(ASYMPTOTE_CHECKPOINT)).toBeLessThan(0.5)
-    // The course really has stopped: the floors, not the ramp, are what this
-    // row is measuring. (Not exactly equal — the ramp approaches its floors
-    // asymptotically — but to well under a tenth of the quantity in question.)
-    expect(late.gap).toBeCloseTo(gapHeight(3600), 5)
-  })
-
-  /**
-   * **The exit assumptions straddle the floor.** The published row lets the
-   * kite leave the previous gap hugging its near edge — holding nothing there
-   * in order to hold 12.9 here — which the model's own "at every gate" does not
-   * license (GOK-25, finding 1). Asking for the same clearance at both ends is
-   * a fixed point, and at rest it lands *under* the floor at the two endgame
-   * checkpoints.
-   *
-   * This is not a FAIL of the criterion as written, and the reason is the
-   * symmetric point: a collector that holds clearance at the previous gate is
-   * also still moving as it leaves it, and ~100 px/s restores every cell. The
-   * two assumptions pull opposite ways and the published figure sits between
-   * them. Which one §2.3 means is the CTO's, so this test pins the straddle
-   * rather than picking a side.
-   */
-  it('straddles the floor once the exit from the previous gap is priced', () => {
-    for (const elapsed of [210, 270]) {
-      const floor = requiredFloor(elapsed)
-      const settled = selfConsistentWorstGate(elapsed)
-      const moving = selfConsistentWorstGate(elapsed, { approachExitVelocity: 100 })
-      expect(settled).toBeLessThan(floor)
-      expect(moving).toBeGreaterThanOrEqual(floor)
-      // And the published row is between the two, which is the whole claim.
-      expect(WORST_GATE_TABLE[elapsed] as number).toBeGreaterThan(settled)
-      expect(WORST_GATE_TABLE[elapsed] as number).toBeLessThanOrEqual(moving + 0.1)
-    }
-  })
-
-  /**
-   * Phase 1 is insensitive to the exit *velocity* and not to the exit
-   * *position* — which is the correction to what I reported on GOK-17, where I
-   * swept the one axis that could not move the answer and called the cell
-   * robust. The fixed points are 36.0 at t = 60 and 56.1 at t = 0, against
-   * published cells of 41.1 and 62.9. Both clear their floors twice over, so
-   * nothing rests on them; this is here so the claim cannot be made again.
-   *
-   * One probe rather than the fixed point, because the fixed point costs a
-   * model evaluation per step and the straddle test above already exercises
-   * it. Asking the kite to leave the previous gap holding what this row claims
-   * to hold here is the single most interesting point on the map anyway.
-   */
-  it('and phase 1 moves on that axis too, even though it clears easily', () => {
-    const published = WORST_GATE_TABLE[60] as number
-    const holdingBoth = collectingCost(60, {
-      worstGate: true,
-      towardDelta: worstGateTowardDelta(60) + published,
-    }).collectingClearance
-    expect(holdingBoth).toBeLessThan(published - 5)
-    expect(holdingBoth).toBeGreaterThan(1.5 * requiredFloor(60))
   })
 
   it('is never easier than the typical gate, and never free', () => {
-    for (const r of WORST) {
+    for (const r of NEAR) {
       expect(r.collectingClearance).toBeLessThanOrEqual(
         (PUBLISHED_COST_TABLE[r.elapsed] as number) + 0.1,
       )
@@ -312,50 +265,169 @@ describe('the worst legal gate (spec §2.3)', () => {
   it('costs nothing extra in phase 1, where the approach is free', () => {
     for (const elapsed of [0, 30, 60]) {
       expect(
-        Math.abs(worst(elapsed).collectingClearance - row(elapsed).collectingClearance),
+        Math.abs(near(elapsed).collectingClearance - row(elapsed).collectingClearance),
       ).toBeLessThan(0.1)
     }
   })
 
   /** And it does bite in phase 2, where the interval has closed up. */
   it('costs real clearance in phase 2', () => {
-    for (const elapsed of [90, 150, 210, 270]) {
-      expect(worst(elapsed).collectingClearance).toBeLessThan(row(elapsed).collectingClearance - 4)
-    }
-  })
-
-  it('matches the row published in spec §2.3', () => {
-    for (const elapsed of COST_CHECKPOINTS) {
-      expect(worst(elapsed).collectingClearance).toBeCloseTo(WORST_GATE_TABLE[elapsed] as number, 1)
+    for (const elapsed of [90, 150, 210, 270, ASYMPTOTE_CHECKPOINT]) {
+      expect(near(elapsed).collectingClearance).toBeLessThan(row(elapsed).collectingClearance - 4)
     }
   })
 
   /**
-   * The required floor is derived, not transcribed: it is 25% of the margin
-   * until the margin gets small enough for the absolute 12 px to take over,
-   * which happens between t = 150 and t = 210.
+   * The bias has a sign, and it is the dangerous one. The column constraint and
+   * the held clearance are *sampled* on the dt grid rather than solved, so a
+   * coarse grid steps over near-misses and reports clearance the line never
+   * holds. Every cell of both tables moved **down** when the grid converged.
+   * A model that errs optimistically is the wrong kind of model to grade a
+   * reachability floor with, which is the argument §2.2's grid box makes for
+   * paying for 1/8000.
    */
-  it('derives its floor from the gap the ramp actually produces', () => {
-    expect(requiredFloor(0)).toBeCloseTo(28.5, 1)
-    expect(requiredFloor(90)).toBeCloseTo(14.75, 2)
-    expect(requiredFloor(210)).toBe(12)
-    expect(requiredFloor(3600)).toBe(12)
+  it('errs optimistically when coarse, which is why the default had to move', () => {
+    for (const elapsed of PUBLISHED_CHECKPOINTS) {
+      const old = collectingCost(elapsed, { dt: 1 / 500, worstGate: true }).collectingClearance
+      expect(old).toBeGreaterThan(NEAR_EDGE_WORST_GATE[elapsed] as number)
+    }
   })
 }, 180_000)
+
+/**
+ * **§2.3's criterion, on the collector v2.2 says it is about.**
+ *
+ * The exit state is an output of the definition rather than an input to it, so
+ * the figure is a joint fixed point in (position, velocity) over the worst
+ * legal *sequence* of sides. `SELF_CONSISTENT_WORST_GATE` is the derived row
+ * and `pnpm feel:reach` is what produces it: one cell is an orbit iteration
+ * inside a bisection inside a model evaluation, minutes apiece in phase 1, so
+ * the constant is the pin and CI re-derives the one cell the verdict turns on.
+ */
+describe('the self-consistent collector (spec §2.3, derived)', () => {
+  // The asymptote, solved once and shared. It is the binding cell — the course
+  // is at its floors from t = 1200 s, so it is every gate of the rest of a run
+  // of any length — and it is the one `worstGateTowardDelta` has fallen to zero
+  // at, which is where this model is at its least conservative.
+  const ASYMPTOTE = worstCycle(ASYMPTOTE_CHECKPOINT)
+
+  it('pins the derived row at every published checkpoint, the asymptote included', () => {
+    expect(Object.keys(SELF_CONSISTENT_WORST_GATE).map(Number)).toEqual([...PUBLISHED_CHECKPOINTS])
+    for (const elapsed of PUBLISHED_CHECKPOINTS) {
+      const derived = SELF_CONSISTENT_WORST_GATE[elapsed] as number
+      // It is a sustained figure, so it cannot beat the collector that is
+      // handed the previous gap's near edge for free.
+      expect(derived).toBeLessThanOrEqual((NEAR_EDGE_WORST_GATE[elapsed] as number) + 0.1)
+      expect(derived).toBeGreaterThan(0)
+    }
+  })
+
+  /**
+   * **The verdict, and it is a reachability failure.** Phase 1 and the knee at
+   * t = 90 s clear their floors — the last of them by 0.4 px — and every cell
+   * from t = 150 s on is under. At the asymptote, which is not a limit but
+   * every gate of the rest of a run of any length, it is 8.5 against 12.0.
+   *
+   * A cell crossing its floor in *either* direction is a change of verdict and
+   * goes to the CTO (§3), so this asserts the whole shape rather than only the
+   * half that is currently true: it fails if a cell starts clearing just as
+   * loudly as if one stops.
+   */
+  it('clears its floor to t = 90 s and fails it from t = 150 s on', () => {
+    for (const elapsed of PUBLISHED_CHECKPOINTS) {
+      const derived = SELF_CONSISTENT_WORST_GATE[elapsed] as number
+      const clears = derived >= requiredFloor(elapsed)
+      expect({ elapsed, clears }).toEqual({ elapsed, clears: elapsed <= 90 })
+    }
+  })
+
+  /**
+   * And the model still produces the pinned cell at the asymptote. Re-deriving
+   * all eight here would be a quarter of an hour of CI for cells that clear by
+   * 20 px; `pnpm feel:reach` is the command that does that.
+   */
+  it('re-derives the cell the verdict turns on', () => {
+    expect(ASYMPTOTE.clearance).toBeCloseTo(
+      SELF_CONSISTENT_WORST_GATE[ASYMPTOTE_CHECKPOINT] as number,
+      0,
+    )
+    expect(ASYMPTOTE.clearance).toBeLessThan(requiredFloor(ASYMPTOTE_CHECKPOINT))
+    // The ring is still collectable on the worst course; what fails is the
+    // clearance, not the reach. A course the ring cannot be taken on at all
+    // would be a different and larger finding.
+    expect(ASYMPTOTE.collectable).toBe(true)
+    // And it cannot beat the collector that is handed the previous gap's near
+    // edge for free, which is the bracket the bisection runs inside — at this
+    // checkpoint that is 12.2 px, against a floor of 12.0. For the derived cell
+    // to clear, self-consistency would have to cost under a quarter of a pixel.
+    const nearEdge = collectingCost(ASYMPTOTE_CHECKPOINT, { worstGate: true }).collectingClearance
+    expect(ASYMPTOTE.clearance).toBeLessThanOrEqual(nearEdge)
+    expect(nearEdge - requiredFloor(ASYMPTOTE_CHECKPOINT)).toBeLessThan(0.3)
+  })
+
+  /**
+   * The exit velocity is the half of the ruling that is new, and the point of
+   * deriving it is that it could have come out anywhere. It comes out **small
+   * and frequently inward** — nothing like the ~100 px/s that "restores every
+   * cell", and on the wrong side of zero as often as not.
+   *
+   * That is a statement about the line, not about the control: the model can
+   * express an exit at any speed up to the clamp (`flyReturn`'s release phase),
+   * and the orbit does not want one. A collector that leaves fast is a
+   * collector that spent the traversal accelerating back out of the gap, and at
+   * these gap heights it cannot afford the clearance that costs.
+   */
+  it('derives an exit velocity, and it is nowhere near the 100 px/s that rescues the cell', () => {
+    expect(Math.abs(ASYMPTOTE.exit.velocity)).toBeLessThan(60)
+    // Self-consistency on the position axis, which the orbit gets for free: the
+    // exit is a point of the traversal, so a line holding C leaves at least C
+    // inside the edge. This is the half the struck row fixed by hand, in the
+    // generous direction.
+    const safeHalfWidth = gapHeight(ASYMPTOTE_CHECKPOINT) / 2 - KITE_RADIUS
+    expect(Math.abs(ASYMPTOTE.exit.offset)).toBeLessThanOrEqual(safeHalfWidth - ASYMPTOTE.clearance)
+  })
+
+  /**
+   * The cycle searches coarser grids than the published tables do, because it
+   * nests an orbit iteration and a bisection inside them. This is the control
+   * that says the trade is free at the precision the row is reported to — one
+   * checkpoint, at the published resolution on every axis at once.
+   */
+  it("the cycle's own grids are inert", () => {
+    // Measured at a coarse `dt`, the way the switch-grid control below is. The
+    // claim is about the *search* resolution — how finely the collect window,
+    // the switch time and the approach bracket are swept — and it holds at any
+    // integration step; pricing it at the published one is a six-minute
+    // assertion about a quantity reported to a tenth of a pixel.
+    const dt = 1 / 1000
+    const coarse = worstCycle(ASYMPTOTE_CHECKPOINT, { dt }).clearance
+    const fine = worstCycle(ASYMPTOTE_CHECKPOINT, {
+      dt,
+      cycleGrid: { dxStep: 1, approachDt: dt, switchSamples: 60, approachBrackets: 96 },
+    }).clearance
+    expect(Math.abs(coarse - fine)).toBeLessThan(0.3)
+    // And the coarse grid is the coarse one, so the comparison is not two
+    // names for the same run.
+    expect(CYCLE_GRID.dxStep).toBeGreaterThan(1)
+    expect(CYCLE_GRID.approachDt).toBeGreaterThan(1 / 8000)
+    expect(CYCLE_GRID.switchSamples).toBeLessThan(60)
+  })
+}, 900_000)
 
 describe('the model itself', () => {
   /**
    * The convergence check this replaces refined `dt` and `switchSamples`
    * together and ran balanced mode only — so it never covered the mode with
    * the pinned table, and it spent most of its budget on the knob that does
-   * nothing (GOK-25, finding 2). Refined properly it failed at t = 90 s.
+   * nothing (GOK-25, finding 2). Refined properly it moved a row by 0.78 px.
    *
-   * Three representative points rather than all seven, because the reference
-   * grid is twice the work of the default: phase 1, the phase-2 knee where the
-   * approach starts to bite, and the endgame where the margin over the floor is
-   * thinnest.
+   * §2.2's grid box makes `dt = 1/8000` part of the published figure and §3
+   * requires it be refined **alone**, in worst-gate mode. Three representative
+   * points rather than all eight, because the reference grid is twice the work
+   * of the default: phase 1, the phase-2 knee where the approach starts to
+   * bite, and the asymptote where the margin is thinnest.
    */
-  const SPOTS = [0, 90, 270] as const
+  const SPOTS = [0, 90, ASYMPTOTE_CHECKPOINT] as const
 
   it('has settled: refining dt moves no row by more than a tenth of a pixel', () => {
     for (const worstGate of [false, true]) {
@@ -390,26 +462,4 @@ describe('the model itself', () => {
       expect(Math.abs(coarse - fine)).toBeLessThan(0.05)
     }
   })
-
-  /**
-   * The bias has a sign, and it is the dangerous one. The column constraint and
-   * the held clearance are *sampled* on the dt grid rather than solved, so a
-   * coarse grid steps over near-misses and reports clearance the line never
-   * holds. Every cell of both tables moved **down** when the grid converged.
-   * A model that errs optimistically is the wrong kind of model to grade a
-   * reachability floor with, which is the argument for paying for 1/8000.
-   */
-  it('errs optimistically when coarse, which is why the default had to move', () => {
-    for (const elapsed of COST_CHECKPOINTS) {
-      const old = collectingCost(elapsed, { dt: 1 / 500, worstGate: true }).collectingClearance
-      expect(old).toBeGreaterThan(WORST_GATE_TABLE[elapsed] as number)
-    }
-  })
-
-  it('covers every checkpoint the spec publishes', () => {
-    expect(TABLE.map((r) => r.elapsed)).toEqual([...COST_CHECKPOINTS])
-    expect(Object.keys(PUBLISHED_COST_TABLE).map(Number)).toEqual([...COST_CHECKPOINTS])
-    expect(Object.keys(WORST_GATE_TABLE).map(Number)).toEqual([...COST_CHECKPOINTS])
-    expect(ASYMPTOTE_CHECKPOINT).toBeGreaterThan(Math.max(...COST_CHECKPOINTS))
-  })
-}, 180_000)
+}, 600_000)

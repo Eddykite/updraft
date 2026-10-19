@@ -26,7 +26,13 @@ jobs:
   verify:
     name: verify
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The unit suite carries two reference models — the cost model of spec §2.2
+    # and the §2.3 reachability derivation — and they are numerical integrations
+    # on a published grid, not assertions about objects. Under v8 coverage
+    # instrumentation they are about twice their bare cost: the unit suite is
+    # ~5 minutes bare and ~10 under coverage. 30 minutes is headroom over that,
+    # not an expectation of it.
+    timeout-minutes: 30
 
     steps:
       # All third-party actions are pinned to commit SHAs, never floating tags (spec §7).

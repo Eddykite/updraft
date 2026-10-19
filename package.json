@@ -24,6 +24,7 @@
     "e2e": "playwright test",
     "feel": "node scripts/run-tool.mjs tools/feel/report.ts",
     "feel:sweep": "node scripts/run-tool.mjs tools/feel/sensitivity.ts",
+    "feel:reach": "node scripts/run-tool.mjs tools/feel/reachability.ts",
     "verify": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test:coverage && pnpm build && pnpm budget",
     "feel:tape": "node scripts/run-tool.mjs tools/feel/tape-search.ts",
     "feel:golden": "node scripts/run-tool.mjs tools/feel/record-golden.ts"
