@@ -195,9 +195,12 @@ export const MAX_CENTRE_DELTA_MAX = 420
  * How far the gap centre may move *toward* the ring's side, in px, at q = 0.
  *
  * The ring and the course spend the same vertical budget (spec §2.3). On a gate
- * where the gap centre jumps a long way away from the ring, both bills come due
- * at once and the ring stops being takeable at any survivable clearance — which
- * would make it fake in the other direction. The cap is written on the *course*
+ * where the gap centre jumps a long way *toward* the ring, both bills come due
+ * at once — the previous gap sat on the far side, so the course move and the
+ * detour add instead of cancelling — and the ring stops being takeable at any
+ * survivable clearance, which would make it fake in the other direction. That
+ * is the direction this constant caps, and the direction `worstGate` in
+ * tools/feel/cost.ts prices. The cap is written on the *course*
  * rather than on the ring because the ring's position is what the player reads,
  * so it should not be the thing that quietly bends. It shrinks to 0 as the
  * second ramp tightens: `thermalTowardDelta(t) = 30·(1 - q)`.

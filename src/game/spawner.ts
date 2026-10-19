@@ -20,10 +20,12 @@
  * budget.** Between two gates the kite has `reach(T)` of settled travel. The
  * course asks for some of it (the change in gap centre); a collecting line asks
  * for the rest (out to the ring and back). On a gate where the centre jumps a
- * long way *away* from the ring, both bills come due at once and the ring stops
- * being takeable at any survivable clearance — fake in the other direction,
- * which the brief rules out as firmly as making it free. So the gap may move
- * away from the ring's side freely, and *toward* it by at most 30·(1 - q) px.
+ * long way *toward* the ring, both bills come due at once: the previous gap sat
+ * on the far side, so the course move and the detour add rather than cancel,
+ * and the ring stops being takeable at any survivable clearance — fake in the
+ * other direction, which the brief rules out as firmly as making it free. So
+ * the gap may move away from the ring's side freely, and *toward* it by at most
+ * 30·(1 - q) px.
  *
  * The side itself stays a fair coin and so does the direction, so the course is
  * unbiased over a run and half of all gates are "tight" (flat approach,
