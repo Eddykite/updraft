@@ -10,6 +10,7 @@ import {
   PUBLISHED_COST_TABLE_REVISION,
   REFERENCE_DT,
   SELF_CONSISTENT_WORST_GATE,
+  SWITCH_REFERENCE,
   collectingCost,
   costTable,
   requiredFloor,
@@ -141,6 +142,17 @@ describe('the model against the table published in spec §2.2', () => {
    * they inherited a stale baseline, and what it was really recording was the
    * staleness of the copy rather than a shortfall in the design. There is no
    * shortfall to pin, so the bar is the publication rounding instead.
+   *
+   * **"On this grid" is load-bearing in that sentence.** The grid is converged
+   * in `dt` and is not converged in `switchSamples` (GOK-26), so what this
+   * asserts is that the model reproduces the cells §2.2 published *from this
+   * configuration* — which is a transcription check, exactly as it says, and
+   * not a claim that those cells are the converged ones. On a converged switch
+   * grid seven of the eight decimals change — six of them by more than the
+   * 0.1 px `dt` is held to — all of them upward, and all of them still inside
+   * §2.2's ±2 px, which is why that pin would not have caught this either.
+   * Raising the knob is a spec revision because it moves published cells, so
+   * this bar holds until §2.2 moves with it.
    */
   it('is the published table, to the rounding it is published at', () => {
     for (const elapsed of PUBLISHED_CHECKPOINTS) {
@@ -278,13 +290,18 @@ describe('the collector the struck §2.3 row was measured on', () => {
   })
 
   /**
-   * The bias has a sign, and it is the dangerous one. The column constraint and
-   * the held clearance are *sampled* on the dt grid rather than solved, so a
-   * coarse grid steps over near-misses and reports clearance the line never
-   * holds. Every cell of both tables moved **down** when the grid converged.
-   * A model that errs optimistically is the wrong kind of model to grade a
+   * `dt`'s bias has a sign, and it is the dangerous one. The column constraint
+   * and the held clearance are *sampled* on the dt grid rather than solved, so
+   * a coarse grid steps over near-misses and reports clearance the line never
+   * holds. Every cell of both tables moved **down** when `dt` converged. A
+   * model that errs optimistically is the wrong kind of model to grade a
    * reachability floor with, which is the argument §2.2's grid box makes for
    * paying for 1/8000.
+   *
+   * This is a claim about `dt` alone, and deliberately so: the switch grid's
+   * bias runs the other way, and a statement about "the grid" that did not say
+   * which knob is how the two came to be netted against each other in the first
+   * place. See `is not converged in the switch grid` below.
    */
   it('errs optimistically when coarse, which is why the default had to move', () => {
     for (const elapsed of PUBLISHED_CHECKPOINTS) {
@@ -417,15 +434,21 @@ describe('the self-consistent collector (spec §2.3, derived)', () => {
 describe('the model itself', () => {
   /**
    * The convergence check this replaces refined `dt` and `switchSamples`
-   * together and ran balanced mode only — so it never covered the mode with
-   * the pinned table, and it spent most of its budget on the knob that does
-   * nothing (GOK-25, finding 2). Refined properly it moved a row by 0.78 px.
+   * together and ran balanced mode only, so it never covered the mode with the
+   * pinned table (GOK-25, finding 2). Refined properly it moved a row by
+   * 0.78 px.
    *
-   * §2.2's grid box makes `dt = 1/8000` part of the published figure and §3
-   * requires it be refined **alone**, in worst-gate mode. Three representative
-   * points rather than all eight, because the reference grid is twice the work
-   * of the default: phase 1, the phase-2 knee where the approach starts to
-   * bite, and the asymptote where the margin is thinnest.
+   * The original diagnosis — that it wasted its budget on a knob that does
+   * nothing — was wrong, and the real reason is worse (GOK-26). Coarse `dt` is
+   * optimistic and coarse `switchSamples` is pessimistic, provably so in both
+   * cases, and refining them together **partly cancels them**. A joint check
+   * does not merely dilute the signal; it subtracts it. That is why §3 requires
+   * one knob at a time, and why there are now two tests here rather than one
+   * and a dismissal.
+   *
+   * Three representative points rather than all eight, because the reference
+   * grid is twice the work of the default: phase 1, the phase-2 knee where the
+   * approach starts to bite, and the asymptote where the margin is thinnest.
    */
   const SPOTS = [0, 90, ASYMPTOTE_CHECKPOINT] as const
 
@@ -440,26 +463,63 @@ describe('the model itself', () => {
   })
 
   /**
-   * And the other knob is inert, which is why refining both at once hid the
-   * problem: a fourfold refinement of `switchSamples` moves nothing, so a
-   * check that spends its budget there measures its own patience.
+   * **The other knob is not inert, and the claim that it was is what this
+   * replaces** (GOK-26).
    *
-   * Measured at a coarse `dt` on purpose. The claim is about the switch grid
-   * and holds at any `dt`; pricing it at the default would cost eight model
-   * evaluations at the default's resolution to say the same thing.
+   * The test that used to sit here asserted that `switchSamples` carries none
+   * of the error — and it ran `worstGate: true` at `dt = 1/4000`, which is the
+   * one configuration in which that is true. Worst-gate `t ≥ 90` is the region
+   * where the knob is *exactly* inert, and at `dt = 1/4000` the t = 0 cell
+   * happens to read 0.0000 as well, so the only grid the check ever visited was
+   * one nobody computes on. Same shape as GOK-25's finding 2, which this file
+   * fixed for `dt`: a convergence check run somewhere other than the published
+   * configuration.
+   *
+   * So this one runs at the **default `dt`, in both modes**, and asserts what
+   * is actually true of the published grid — which is two different things in
+   * two places, and both are worth pinning:
+   *
+   * - **Exactly inert where §2.3's verdict lives.** Every worst-gate phase-2
+   *   cell is identical to the last bit under an eightfold refinement, the
+   *   near-edge ceiling the self-consistent bisection brackets against
+   *   included. Exact equality is the honest assertion here rather than a
+   *   tolerance, because the grids nest: `{k/60} ⊂ {k/480}`, so the refinement
+   *   maximises over a superset and either finds a strictly better switch time
+   *   or returns the same float. A tolerance would hide the first case.
+   * - **Not inert in the published §2.2 row**, which moves by more than the
+   *   0.1 px `dt` is held to. That bound is pinned from both sides so the
+   *   sensitivity cannot quietly grow *or* vanish: if it ever drops under
+   *   0.1 px the switch grid has converged and §2.2's table should be re-read
+   *   on it, which is as much a change of state as the reverse.
+   *
+   * The direction is pinned too, and it is provable rather than measured: a max
+   * over a superset cannot fall, so refining can only raise the figure. Coarse
+   * `switchSamples` is **pessimistic**, the opposite sign to `dt`'s bias — which
+   * is the real reason the old refine-both-at-once check looked settled.
    */
-  it('is insensitive to the switch-time grid, so dt is the whole claim', () => {
-    for (const elapsed of SPOTS) {
-      const coarse = collectingCost(elapsed, {
-        dt: 1 / 4000,
-        worstGate: true,
-      }).collectingClearance
+  it('is not converged in the switch grid, and that is confined to §2.2', () => {
+    // The floors, and the ceiling the derived row brackets against. These are
+    // the cells a change here would have to move to change a verdict.
+    for (const elapsed of [90, 150, 210, 270, ASYMPTOTE_CHECKPOINT]) {
+      const coarse = collectingCost(elapsed, { worstGate: true }).collectingClearance
       const fine = collectingCost(elapsed, {
-        dt: 1 / 4000,
         worstGate: true,
-        switchSamples: 240,
+        switchSamples: SWITCH_REFERENCE,
       }).collectingClearance
-      expect(Math.abs(coarse - fine)).toBeLessThan(0.05)
+      expect(fine).toBe(coarse)
     }
+
+    // And the published row, which does move.
+    const shifts = SPOTS.map((elapsed) => {
+      const coarse = collectingCost(elapsed).collectingClearance
+      const fine = collectingCost(elapsed, { switchSamples: SWITCH_REFERENCE }).collectingClearance
+      return fine - coarse
+    })
+    for (const shift of shifts) expect(shift).toBeGreaterThanOrEqual(0)
+    expect(Math.max(...shifts)).toBeGreaterThan(0.1)
+    expect(Math.max(...shifts)).toBeLessThan(0.6)
+    // The reference is a bar, not a converged grid — it is a refinement of the
+    // default and nothing more. See `SWITCH_REFERENCE`.
+    expect(SWITCH_REFERENCE).toBeGreaterThan(60)
   })
 }, 600_000)

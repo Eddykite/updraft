@@ -698,39 +698,101 @@ const CYCLE_CONTROLS: readonly (readonly [ReturnControl, number])[] = [
 ]
 
 /**
- * Grid resolution.
+ * Grid resolution — two knobs, converged to different degrees, with opposite
+ * biases. Refine them **one at a time, each against its own bar**; refining
+ * both together is what hid a 0.78 px error for a revision, and the reason it
+ * hid it is in the second half of this comment.
  *
- * ## The whole error lives in `dt`, and it is one-sided
+ * ## `dt`: converged at 1/8000, and its error is one-sided *optimistic*
  *
  * The old default of `dt = 1/500` claimed "every row within 0.5 px" on the
- * strength of a convergence check that refined *both* knobs at once and ran
- * balanced mode only (GOK-25, finding 2). Refined one at a time, at t = 90 s in
- * worst-gate mode:
+ * strength of a convergence check that refined both knobs at once and ran
+ * balanced mode only (GOK-25, finding 2). Refined alone, at t = 90 s in
+ * worst-gate mode, `dt` 1/500 → 1/32000 moves the row by **0.78 px**,
+ * monotonically downward.
  *
- * - `switchSamples` 60 → 1600 at `dt = 1/4000`: **0.014 px**, and 60 / 120 / 240
- *   are identical to three decimals. The switch time is inert above ~60.
- * - `dt` 1/500 → 1/32000 at 60 samples: **0.78 px**, monotonically downward.
- *
- * The reason it is `dt` and the reason the bias has a sign are the same: the
- * column constraint and the held clearance are *sampled* on the dt grid, in
- * `flyReturn`'s loop, not solved. A coarse grid steps over near-misses, so it
- * reports lines that do not survive and clearances the line never actually
- * holds. Coarse is always optimistic, never pessimistic — which is the worst
- * direction for a number that is graded against a floor. Making the position
- * integration exact rather than Euler moves these rows by under 0.1 px, which
- * is the control that says it is the sampling and not the integration.
- *
- * ## Why 1/8000
+ * The reason the bias has a sign: the column constraint and the held clearance
+ * are *sampled* on the dt grid, in `flyReturn`'s loop, not solved. A coarse
+ * grid steps over near-misses, so it reports lines that do not survive and
+ * clearances the line never actually holds. Coarse is always optimistic, never
+ * pessimistic — the worst direction for a number graded against a floor. Making
+ * the position integration exact rather than Euler moves these rows by under
+ * 0.1 px, which is the control that says it is the sampling and not the
+ * integration.
  *
  * Against a 1/32000 reference, every published row of both tables lands within
- * **0.1 px**; 1/500 missed by up to 0.78, and 1/4000 is not reliably inside
- * 0.1 either. The claim is held by `the model itself` in tests/cost.test.ts,
- * which now refines `dt` alone and covers worst-gate mode, since that is the
- * mode with the pinned table. It uses `REFERENCE_DT` rather than 1/32000
- * because the two agree to 0.03 px everywhere and the test runs in CI under
- * coverage instrumentation.
+ * **0.1 px** at 1/8000; 1/500 missed by up to 0.78, and 1/4000 is not reliably
+ * inside 0.1 either. `the model itself` in tests/cost.test.ts holds the claim,
+ * refining `dt` alone and covering worst-gate mode. It uses `REFERENCE_DT`
+ * rather than 1/32000 because the two agree to 0.03 px everywhere and it runs
+ * in CI under coverage instrumentation.
  *
- * The residual ~0.03 px of non-monotone jitter at that grid is the 1 px `dx`
+ * ## `switchSamples`: **not** converged at 60, and its error is *pessimistic*
+ *
+ * This corrects the paragraph that used to stand here, and §2.2's grid box with
+ * it (GOK-26). Both said the switch time was "inert above ~60" and therefore
+ * that `dt` was the whole claim. Both measured it in **worst-gate mode at
+ * `dt = 1/4000`** — which is the one configuration in which it is true. At the
+ * shipped `dt`, refining `switchSamples` alone:
+ *
+ * | t | 0 | 30 | 60 | 90 | 150 | 210 | 270 | 1800 |
+ * | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+ * | balanced, 60 | 62.869 | 48.118 | 41.081 | 31.992 | 24.853 | 21.755 | 20.215 | 18.696 |
+ * | balanced, 7680 | 63.265 | 48.154 | 41.274 | 32.044 | 24.982 | 21.887 | 20.373 | 18.907 |
+ * | Δ | +0.396 | +0.037 | +0.193 | +0.052 | +0.129 | +0.132 | +0.158 | +0.211 |
+ * | worst gate, Δ | +0.086 | +0.111 | +0.193 | **0** | **0** | **0** | **0** | **0** |
+ *
+ * 7680 is the limit to 0.005 px — 3840 → 7680 moves one cell, by 0.0034. The
+ * smallest grid clearing a 0.1 px bar against it is **240** (worst cell 0.075);
+ * 480 gives 0.037 and 960 gives 0.018, which is where `dt`'s own residual sits.
+ *
+ * **The sign is provable rather than measured.** `bestOnSide` takes a `max`
+ * over `switchAt = k / switchSamples`, and the grids nest — `{k/60} ⊂ {k/120} ⊂
+ * {k/240} ⊂ …` — so a finer grid maximises over a superset and the reported
+ * clearance can only rise. Coarse `switchSamples` is therefore **pessimistic**,
+ * the opposite sign to `dt`. Refining the two together partly cancels them,
+ * which is a second and independent reason the old check looked settled, and it
+ * is why refining `dt` alone now *overstates* how converged the instrument is.
+ *
+ * It also means a doubling that changes nothing is not evidence of anything: a
+ * superset can fail to beat its subset and then beat it at the next doubling,
+ * which is exactly what the balanced row does between 120 and 960.
+ *
+ * ## What it moves, and what it provably does not
+ *
+ * **Not the floors.** Worst-gate `t ≥ 90` is *bit-identical* from 60 through
+ * 1920 — every cell §2.3's verdict is graded on, including the 12.2432
+ * near-edge ceiling the self-consistent bisection brackets against. Neither is
+ * the derived row: `worstCycle(1800)` reports 8.486 px at
+ * `cycleGrid.switchSamples` of 30, 60, 120 and 240 alike. GOK-27's straddle and
+ * break-evens are untouched.
+ *
+ * **It does move the published §2.2 row**, by up to 0.40 px at t = 0. Seven of
+ * its eight decimals change and six move by more than the 0.1 px `dt` is held
+ * to: on a converged switch grid §2.2 reads **63.3 / 48.2 / 41.3 / 32.0 / 25.0
+ * / 21.9 / 20.4 / 18.9**. Every one is still inside §2.2's own ±2 px — so that
+ * pin would not have caught this and nothing ruled on the published numbers is
+ * disturbed — but the published decimals are not the converged ones.
+ *
+ * ## Why 60 is still what ships
+ *
+ * Because §2.2's table **is** this model's output on this grid — the document
+ * says to regenerate it from here rather than edit it by hand — so raising the
+ * knob rewrites seven published decimals. §3's rule is that *a change that
+ * moves a published cell is a spec revision, not a retune*; it is written about
+ * `dt` because the grid box believed this knob inert, and it applies to
+ * whichever knob does the moving. Raising it here while `PUBLISHED_COST_TABLE`
+ * still holds v2.2's cells would manufacture the exact failure this file now
+ * guards against: a transcription that no longer matches the grid it was
+ * published on, under a revision guard reading green because the revision has
+ * not moved.
+ *
+ * So the grid moves when §2.2 moves, in one diff. Open with the CTO on GOK-28.
+ * `is not converged in the switch grid, and that is confined to §2.2` in
+ * tests/cost.test.ts pins both halves meanwhile, so neither the inertness nor
+ * the sensitivity can drift unnoticed.
+ *
+ * The residual ~0.03 px of non-monotone jitter at this grid is the 1 px `dx`
  * loop and the 96-sample switch bracket in `approachArrivalVelocity`, not `dt`.
  * It is why the tables are published to one decimal and pinned to 0.1 px rather
  * than quoted further.
@@ -750,6 +812,20 @@ const DEFAULTS: Required<CostModelOptions> = {
  * the comment above and the test that holds it cannot drift apart.
  */
 export const REFERENCE_DT = 1 / 16000
+
+/**
+ * The switch grid `DEFAULTS.switchSamples` is measured against — and, unlike
+ * `REFERENCE_DT`, the default **does not clear it** in balanced mode. That is
+ * the finding, not an oversight; see the comment above.
+ *
+ * It is a bar rather than a converged value: the figure is still creeping
+ * upward at 1920, so refining to this does not produce the converged table, it
+ * only demonstrates that 60 is not it. Eight times the default is enough for
+ * both halves of the claim — the balanced row moves by 0.37 px at t = 0, and
+ * worst-gate `t ≥ 90` is identical to the last bit — and cheap enough to assert
+ * in CI, which 1920 is not.
+ */
+export const SWITCH_REFERENCE = 480
 
 /** What a ring costs at this difficulty, under the reference model. */
 export function collectingCost(elapsed: number, options: CostModelOptions = {}): CostRow {
