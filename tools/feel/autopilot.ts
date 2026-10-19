@@ -172,9 +172,16 @@ export interface RunResult {
   readonly censored: boolean
 }
 
-/** The gate the player is currently flying at: the first one not yet behind the kite. */
-function targetGate(state: GameState): Gate | undefined {
-  return state.gates.find((gate) => gate.x + GATE_WIDTH >= KITE_X - KITE_RADIUS)
+/**
+ * The gate the player is currently flying at: the first one not yet behind the kite.
+ *
+ * `shift` is how far the world will have scrolled by the time the decision being
+ * made lands — `scrollSpeed * latency`, in px. Pass it when the answer is being
+ * used to *steer*, so the gate is the one the kite will be flying at in the frame
+ * the input arrives in; leave it at 0 for present-tense bookkeeping.
+ */
+function targetGate(state: GameState, shift = 0): Gate | undefined {
+  return state.gates.find((gate) => gate.x - shift + GATE_WIDTH >= KITE_X - KITE_RADIUS)
 }
 
 /**
@@ -255,7 +262,22 @@ function offsetAfterTurningBack(
  * hauling back in immediately is not a flinch but the manoeuvre.)
  */
 function aimFor(state: GameState, profile: PlayerProfile, led: Kite): number {
-  const gate = targetGate(state)
+  // Which gate, in the frame this decision lands in. Everything else here is
+  // evaluated there — the kite via `led`, the deadline via `- profile.latency` —
+  // and the gate lookup used to be the one term left in the present tense
+  // (GOK-23). The consequence was not subtle: for the `latency` worth of frames
+  // around every transition the controller steered at the gate *behind* it,
+  // whose `gate.x` the kite has already passed, so `seconds` clamped to 0,
+  // `offsetAfterTurningBack` returned `offset` unchanged, the limit test tripped
+  // and the collector aimed at the old gap's centre — refusing, for those
+  // frames, to begin the detour it was about to need. It cost nothing at 0 ms
+  // and killed the profile outright from about 4 frames up.
+  //
+  // Predicting this is no more clairvoyant than `lookAhead` predicting the
+  // kite: the world's scroll is deterministic, and `unanticipatedFrames: 0` is
+  // *defined* above as the player who predicts the whole queue.
+  const shift = scrollSpeed(state.elapsed) * profile.latency
+  const gate = targetGate(state, shift)
   if (gate === undefined) return KITE_START_Y
 
   const centre = gapCentre(gate)
@@ -389,6 +411,10 @@ export function playRun(seed: number, profile: PlayerProfile, maxSeconds = 300):
   let peakMultiplier = 1
 
   while (state.phase === 'playing' && state.elapsed < maxSeconds) {
+    // Present tense on purpose, unlike the lookup inside `aimFor`: this one is
+    // only deciding *when to redraw* the per-gate aim error. Jitter is
+    // bookkeeping, not steering, and leading it would resample a frame or two
+    // early for no gain.
     const gate = targetGate(state)
     if (gate !== undefined && gate.id !== jitterGateId) {
       jitterGateId = gate.id

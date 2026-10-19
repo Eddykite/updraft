@@ -285,6 +285,51 @@ describe('the instrument is not measuring itself', () => {
   })
 
   /**
+   * Latency the player predicts perfectly must cost them **nothing**. That is
+   * not an aspiration, it is the definition `unanticipatedFrames` is documented
+   * with — "in a deterministic world, perfectly predicted delay is not delay" —
+   * and until GOK-23 nothing held the controller to it.
+   *
+   * It was not holding. Every quantity in `aimFor` was evaluated in the frame
+   * the decision lands in except the gate lookup, which was present-tense, so
+   * for the `latency` worth of frames around every gate transition the collector
+   * steered at the gate behind it and declined to start the detour it was about
+   * to need. Swept exactly as below on the pre-fix controller, all five seeds
+   * reached 120 s at 0 and 1 frames of lag; from 2 frames up they started
+   * dying, and at 5 and 6 frames not one of the five lasted 30 s. It was not
+   * even monotone in the latency — at 4 frames three of the five were alive
+   * again — which is what an instrument balanced on its own stability edge
+   * looks like, and is why a sweep with only two sample points (0 ms and 83 ms)
+   * read it as "any latency at all collapses the collector".
+   *
+   * The ring count is pinned alongside the survival because the cheap way to
+   * pass the first half of this is to stop collecting.
+   */
+  it('costs a perfectly-predicting collector nothing to play at any latency', () => {
+    const at = (frames: number): PlayerProfile => ({
+      ...FRAME_PERFECT,
+      latency: frames * FIXED_DT,
+      unanticipatedFrames: 0,
+    })
+
+    const baseline = SEEDS.map((seed) => playRun(seed, at(0), 120))
+    for (const run of baseline) expect(run.crashCause).toBeNull()
+
+    for (const frames of [1, 2, 3, 4, 5, 6]) {
+      const runs = SEEDS.map((seed) => playRun(seed, at(frames), 120))
+      for (const [i, run] of runs.entries()) {
+        expect(`${SEEDS[i]}: ${run.crashCause}`).toBe(`${SEEDS[i]}: null`)
+        expect(run.duration).toBe((baseline[i] as (typeof baseline)[number]).duration)
+        // Surviving by declining every ring would be a different controller, not
+        // a latency-immune one. The band is loose because the lag does move the
+        // line a little — it just must not move the outcome.
+        const taken = (baseline[i] as (typeof baseline)[number]).thermalsCollected
+        expect(run.thermalsCollected).toBeGreaterThan(0.8 * taken)
+      }
+    }
+  })
+
+  /**
    * The `opportunist` was reported under v1 as evidence that a cautious player
    * still takes most rings. It could not have done otherwise: the clearance left
    * by the cheapest collecting line was a constant, so the profile was a step
