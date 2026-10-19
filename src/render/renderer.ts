@@ -31,6 +31,7 @@ import {
   KITE_X,
   VY_CLAMP,
 } from '../game/constants.js'
+import { thermalX } from '../game/collision.js'
 import type { Gate, GameState, Kite } from '../game/state.js'
 import { PALETTE } from './palette.js'
 
@@ -142,7 +143,11 @@ function drawGate(ctx: CanvasRenderingContext2D, gate: Gate, time: number): void
   column(ctx, gate.x, gapBottom, GROUND_Y - gapBottom, false)
 
   if (!gate.thermal.collected) {
-    drawThermal(ctx, gate.x + GATE_WIDTH / 2, gate.thermal.y, gate.thermal.radius, time)
+    // thermalX, not the centre line: the ring leads its gate by THERMAL_LEAD and
+    // sits outside the gap (spec §2.2). Drawing it anywhere else would put the
+    // painted ring somewhere the simulation will not collect it, which is the
+    // one class of bug a player experiences as the game lying to them.
+    drawThermal(ctx, thermalX(gate), gate.thermal.y, gate.thermal.radius, time)
   }
 }
 

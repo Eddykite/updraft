@@ -7,6 +7,9 @@ import {
   MULTIPLIER_CAP,
   SCORE_PER_GATE,
   SCORE_PER_THERMAL,
+  STREAK_MAX,
+  THERMAL_LEAD,
+  STREAK_MISS_PENALTY,
   THERMAL_RADIUS,
 } from '../src/game/constants.js'
 import { gateAward, thermalAward } from '../src/game/scoring.js'
@@ -27,6 +30,16 @@ const RELEASED = { holding: false, confirmPressed: false } as const
  * under real motion is covered by the golden replay and the soak test.
  */
 const STILL = 0
+
+/**
+ * Gate x at which the kite is exactly level with the ring.
+ *
+ * The ring leads its column by THERMAL_LEAD, so this is 29 px *ahead* of the
+ * gate rather than on its centre line — in v1 it was `KITE_X - GATE_WIDTH / 2`.
+ * At this x the columns are still 13 px clear of the kite's rim, which is the
+ * geometry that makes collecting a detour you then have to pay for.
+ */
+const ON_THE_RING = KITE_X + THERMAL_LEAD - GATE_WIDTH / 2
 
 /** A gate placed so that its thermal is exactly on the kite, about to be passed. */
 function gateAt(x: number, overrides: Partial<Gate> = {}): Gate {
@@ -85,7 +98,7 @@ describe('multiplier ladder', () => {
 describe('collecting a thermal', () => {
   it('scores at the multiplier you had going in, then steps the streak up', () => {
     // streak 1 -> 2 is the step that takes the multiplier from 1x to 2x.
-    const before = playing([gateAt(KITE_X - GATE_WIDTH / 2)], { streak: 1, multiplier: 1 })
+    const before = playing([gateAt(ON_THE_RING)], { streak: 1, multiplier: 1 })
     const after = step(before, RELEASED, STILL)
 
     expect(after.score).toBe(5) // paid at 1x, not at the 2x it just earned
@@ -99,14 +112,14 @@ describe('collecting a thermal', () => {
   })
 
   it('does not announce a multiplier step on the thermals between steps', () => {
-    const before = playing([gateAt(KITE_X - GATE_WIDTH / 2)], { streak: 0, multiplier: 1 })
+    const before = playing([gateAt(ON_THE_RING)], { streak: 0, multiplier: 1 })
     const after = step(before, RELEASED, STILL)
     expect(after.multiplier).toBe(1)
     expect(after.events).toEqual([{ type: 'thermal_collected', gateId: 0, points: 5 }])
   })
 
   it('collects each thermal exactly once', () => {
-    let state = playing([gateAt(KITE_X - GATE_WIDTH / 2)])
+    let state = playing([gateAt(ON_THE_RING)])
     state = step(state, RELEASED, STILL)
     const afterFirst = state.score
     state = step({ ...state, events: [] }, RELEASED, STILL)
@@ -116,7 +129,7 @@ describe('collecting a thermal', () => {
   })
 
   it('stops paying more at the cap', () => {
-    const before = playing([gateAt(KITE_X - GATE_WIDTH / 2)], { streak: 20, multiplier: 5 })
+    const before = playing([gateAt(ON_THE_RING)], { streak: 20, multiplier: 5 })
     const after = step(before, RELEASED, STILL)
     expect(after.multiplier).toBe(MULTIPLIER_CAP)
     expect(after.score).toBe(25)
@@ -160,19 +173,101 @@ describe('passing a gate', () => {
     expect(state.events).toEqual([])
   })
 
-  it('resets the streak and the multiplier when the thermal was missed', () => {
+  /**
+   * The v2 rule, and the test that fails on v1's. A missed ring costs exactly
+   * one multiplier step, not the whole ladder — reset-to-zero priced a single
+   * cautious decision at about 325 points and so removed the choice at every
+   * streak above zero, which is a cliff rather than a decision.
+   */
+  it('steps the streak down by two when the thermal was missed, rather than resetting it', () => {
     const missed = gateAt(CLEARED, { thermal: { y: -100, radius: 1, collected: false } })
     const before = playing([missed], { streak: 7, multiplier: 4 })
     const after = step(before, RELEASED, STILL)
 
-    // The gate still pays at the multiplier you arrived with; the reset lands after.
+    // The gate still pays at the multiplier you arrived with; the step lands after.
     expect(after.score).toBe(40)
-    expect(after.streak).toBe(0)
-    expect(after.multiplier).toBe(1)
+    expect(after.streak).toBe(7 - STREAK_MISS_PENALTY)
+    expect(after.multiplier).toBe(3)
     expect(after.events).toEqual([
       { type: 'gate_passed', gateId: 0, points: 40 },
-      { type: 'streak_reset', gateId: 0 },
+      { type: 'streak_dropped', gateId: 0, streak: 5 },
     ])
+  })
+
+  it('floors the streak at zero rather than going negative', () => {
+    const missed = gateAt(CLEARED, { thermal: { y: -100, radius: 1, collected: false } })
+    for (const streak of [0, 1, 2]) {
+      const after = step(
+        playing([missed], { streak, multiplier: multiplierFor(streak) }),
+        RELEASED,
+        STILL,
+      )
+      expect(after.streak).toBe(Math.max(0, streak - STREAK_MISS_PENALTY))
+      expect(after.multiplier).toBe(multiplierFor(after.streak))
+    }
+  })
+
+  /**
+   * The rule stated as the thing it is actually for: the multiplier is a
+   * measurement of how many rings you are taking, not a record of never having
+   * missed one. At +1/-2 the streak drifts by `3c - 2` per gate, so it holds
+   * above zero only while more than two thirds of the rings are taken.
+   */
+  it('holds a multiplier above 1x at a 70% collect rate and loses it at 60%', () => {
+    /**
+     * Fly `gates` gates, collecting the ring on the ones the pattern names.
+     *
+     * Two steps per collected gate, because a ring is only banked by actually
+     * touching it: handing `step` a gate whose thermal is already flagged
+     * collected looks like a collect and is not one — it skips the award and
+     * the streak increment both.
+     */
+    const flyPattern = (pattern: readonly boolean[], gates: number): number => {
+      let state = playing([], { streak: 0, multiplier: 1 })
+      for (let i = 0; i < gates; i += 1) {
+        if (pattern[i % pattern.length] === true) {
+          state = { ...state, events: [], gates: [gateAt(ON_THE_RING, { id: i })] }
+          state = step(state, RELEASED, STILL)
+          state = { ...state, events: [], gates: [{ ...onlyGate(state), x: CLEARED }] }
+        } else {
+          state = { ...state, events: [], gates: [gateAt(CLEARED, { id: i })] }
+        }
+        state = step(state, RELEASED, STILL)
+      }
+      return state.multiplier
+    }
+
+    // 7 of every 10 — above the two-thirds line, so the streak climbs and the
+    // multiplier survives the misses indefinitely.
+    expect(
+      flyPattern([true, true, true, false, true, true, true, false, true, false], 200),
+    ).toBeGreaterThan(1)
+    // 6 of every 10 — below it, so it drains to zero however long you fly, and
+    // no amount of patience buys a multiplier.
+    expect(flyPattern([true, true, false, true, true, false, true, false, true, false], 200)).toBe(
+      1,
+    )
+  })
+
+  it('caps the streak so the ladder has no dead rungs above the 5x cap', () => {
+    const taken = gateAt(ON_THE_RING)
+    let state = playing([], { streak: 0, multiplier: 1 })
+    for (let i = 0; i < 30; i += 1) {
+      state = { ...state, events: [], gates: [{ ...taken, id: i }] }
+      state = step(state, RELEASED, STILL)
+    }
+    expect(state.streak).toBe(STREAK_MAX)
+    expect(state.multiplier).toBe(MULTIPLIER_CAP)
+
+    // And one miss from the cap costs exactly one step, not a cliff: that is
+    // the whole point of capping the streak rather than letting it run away.
+    const missed = gateAt(KITE_X - KITE_RADIUS - GATE_WIDTH - 1, {
+      id: 99,
+      thermal: { y: -100, radius: 1, collected: false },
+    })
+    const after = step({ ...state, events: [], gates: [missed] }, RELEASED, STILL)
+    expect(after.streak).toBe(STREAK_MAX - STREAK_MISS_PENALTY)
+    expect(after.multiplier).toBe(MULTIPLIER_CAP - 1)
   })
 
   it('keeps the streak when the thermal was taken', () => {
@@ -202,7 +297,7 @@ describe('a whole scoring sequence', () => {
       state = {
         ...state,
         events: [],
-        gates: [gateAt(KITE_X - GATE_WIDTH / 2, { id: index })],
+        gates: [gateAt(ON_THE_RING, { id: index })],
       }
       state = step(state, RELEASED, STILL)
       expected += thermalPoints

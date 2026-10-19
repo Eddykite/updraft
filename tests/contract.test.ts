@@ -40,29 +40,55 @@ describe('constants match the signed-off spec §2 table', () => {
     expect(C.GROUND_Y).toBe(930)
   })
 
-  it('gates and thermals', () => {
+  it('gates', () => {
     expect(C.GATE_WIDTH).toBe(70)
     expect(C.GAP_Y_MIN).toBe(80)
     expect(C.GAP_Y_MAX_EDGE).toBe(870)
-    expect(C.THERMAL_RADIUS).toBe(22)
-    expect(C.THERMAL_EDGE_INSET).toBe(45)
     expect(C.FIRST_GATE_DELAY).toBe(1.2)
+    // 540 + THERMAL_LEAD: the ring rides ahead of its column, so a gate is
+    // created far enough off-screen that the ring enters from off-screen too.
+    expect(C.GATE_SPAWN_X).toBe(604)
   })
 
-  it('difficulty endpoints: speed 180->420, gap 260->150, interval 1.6->0.9', () => {
+  it('thermals sit outside the gap and lead their column (spec v2 §2.2)', () => {
+    expect(C.THERMAL_RADIUS).toBe(22)
+    expect(C.THERMAL_LEAD).toBe(64)
+    // The ring's disc clears each column by 7 px of horizontal daylight.
+    expect(C.THERMAL_LEAD - C.THERMAL_RADIUS - C.GATE_WIDTH / 2).toBe(7)
+    // E(t) = 22 + 54(1 - p)^2: 76 px at t = 0, 22 px from t = 90 s on.
+    expect(C.THERMAL_OUTSET_FLOOR).toBe(22)
+    expect(C.THERMAL_OUTSET_FLOOR + C.THERMAL_OUTSET_RANGE).toBe(76)
+    // The floor IS the radius. That equivalence is the replacement invariant.
+    expect(C.THERMAL_OUTSET_FLOOR).toBe(C.THERMAL_RADIUS)
+    expect(C.THERMAL_FIELD_MARGIN).toBe(20)
+    expect(C.THERMAL_Y_MIN).toBe(72)
+    expect(C.THERMAL_Y_MAX).toBe(872)
+  })
+
+  it('difficulty endpoints: speed 180->420->560, gap 260->150->110, interval 1.6->0.9->0.68', () => {
     expect(C.DIFFICULTY_RAMP_SECONDS).toBe(90)
+    expect(C.SECOND_RAMP_HALF_LIFE).toBe(60)
     expect(C.SPEED_BASE).toBe(180)
     expect(C.SPEED_BASE + C.SPEED_RANGE).toBe(420)
+    expect(C.SPEED_LIMIT).toBe(560)
     expect(C.GAP_BASE).toBe(260)
     expect(C.GAP_BASE - C.GAP_RANGE).toBe(150)
+    expect(C.GAP_FLOOR).toBe(110)
     expect(C.INTERVAL_BASE).toBe(1.6)
     expect(C.INTERVAL_BASE - C.INTERVAL_RANGE).toBeCloseTo(0.9, 10)
+    expect(C.INTERVAL_FLOOR).toBeCloseTo(0.68, 10)
+    // The speed ceiling is also exactly the kite's own vertical clamp: the world
+    // never comes at you faster than you can climb.
+    expect(C.SPEED_LIMIT).toBe(C.VY_CLAMP)
   })
 
   it('reachability headroom and clamps', () => {
     expect(C.REACH_HEADROOM).toBe(0.5)
-    expect(C.MAX_CENTRE_DELTA_MIN).toBe(120)
+    // 60, not v1's 120 — at 120 the guard starts overriding the formula below
+    // T = 0.828 s, which the v2 interval floor of 0.68 s reaches.
+    expect(C.MAX_CENTRE_DELTA_MIN).toBe(60)
     expect(C.MAX_CENTRE_DELTA_MAX).toBe(420)
+    expect(C.THERMAL_TOWARD_DELTA).toBe(30)
   })
 
   it('scoring and loop', () => {
@@ -70,6 +96,12 @@ describe('constants match the signed-off spec §2 table', () => {
     expect(C.SCORE_PER_THERMAL).toBe(5)
     expect(C.STREAK_PER_MULTIPLIER).toBe(2)
     expect(C.MULTIPLIER_CAP).toBe(5)
+    expect(C.STREAK_MAX).toBe(8)
+    // A miss costs exactly one multiplier step, and two rings to earn it back.
+    expect(C.STREAK_MISS_PENALTY).toBe(C.STREAK_PER_MULTIPLIER)
+    // STREAK_MAX is exactly the streak that reaches the cap — no dead ladder.
+    expect(multiplierFor(C.STREAK_MAX)).toBe(C.MULTIPLIER_CAP)
+    expect(multiplierFor(C.STREAK_MAX - 1)).toBeLessThan(C.MULTIPLIER_CAP)
     expect(C.FIXED_DT).toBeCloseTo(1 / 60, 12)
     expect(C.MAX_CATCH_UP_STEPS).toBe(5)
   })
